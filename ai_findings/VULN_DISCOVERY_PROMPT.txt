@@ -1,0 +1,41 @@
+You are a security researcher auditing the Nim standard library module `std/asynchttpserver` for vulnerabilities.
+
+### Target File
+lib/pure/asynchttpserver.nim (441 lines)
+
+### Dependencies
+- lib/pure/httpcore.nim
+- lib/pure/parseutils.nim
+- lib/pure/uri.nim
+
+### Output Format
+For each finding use this exact format:
+
+F-NNN: [Title]
+  Type: [DoS / crash / logic / memory / integer / other]
+  Location: file.nim:line
+  Input: [exact input bytes or HTTP request that triggers]
+  Root cause: [specific code flaw]
+  Exploitability: [remote/local, auth needed, impact]
+  Classification: CONFIRMED | LIKELY | SPECULATIVE
+
+### Attack Surfaces
+1. parseProtocol: skipIgnoreCase("HTTP/") then parseSaturatedNatural — what if "HTTP/" with no version?
+2. Request line: split(' ') — tabs? many spaces? missing parts?
+3. Header loop: parseHeader per line — no colon? infinite headers? headerLimit=10000
+4. Content-Length: parseSaturatedNatural — negative? > maxBody? saturation to int.high?
+5. Chunked encoding: parseHexInt per chunk — overflow? infinite loop? maxBody not enforced?
+6. Body accumulation: request.body.add(chunk) — size limit during chunked?
+7. URI: parseUri — length unbounded?
+8. Persistent connections: connection header logic
+9. Expect header: case-sensitive "100-continue" check
+10. HTTP method: case-sensitive match — lowercase? extension methods?
+11. No recv timeouts (line 203 TODO)
+12. FutureVar shared state — race conditions?
+13. split(' ') allocation bomb — many spaces = many strings
+
+### Rules
+- Be specific and evidence-based
+- Do not invent issues
+- Trace code path from input to vulnerable operation
+- State confidence if uncertain

@@ -1,0 +1,39 @@
+F-001: Chunked encoding hex integer overflow causes remote crash
+  Type: crash / DoS
+  Location: asynchttpserver.nim:311
+  Input: `POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n8000000000000000\r\n`
+  Root cause: `parseHexInt` silently overflows; `8000000000000000` overflows `int64` to `-9223372036854775808`. This negative value is passed to `recv(bytesToRead)` (asyncnet.nim:419), which calls `newString(size)` with a negative length, triggering a runtime `RangeDefect`. A max-positive value like `7FFFFFFFFFFFFFFF` causes `newString` to SIGSEGV in the allocator.
+  Exploitability: remote, unauthenticated, single malformed chunked request crashes the server process or connection handler
+  Classification: CONFIRMED
+
+F-002: Chunked encoding lacks total body size limit
+  Type: DoS / memory
+  Location: asynchttpserver.nim:324
+  Input: `POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n800000\r\n` + 8MB data + `\r\n` repeated indefinitely
+  Root cause: The chunked loop reads each chunk size with `parseHexInt`, then `recv(bytesToRead)` and `request.body.add(chunk)`. There is no check that `request.body.len + chunk.len <= server.maxBody`. The `maxBody` limit is only enforced for the `Content-Length` path (line 288), never for chunked bodies.
+  Exploitability: remote, unauthenticated, unbounded memory growth until the server process is OOM-killed
+  Classification: CONFIRMED
+
+F-003: Content-Length partial parse enables request smuggling
+  Type: logic
+  Location: asynchttpserver.nim:284
+  Input: `POST / HTTP/1.1\r\nContent-Length: 0x10\r\n\r\n<16 bytes of body>`
+  Root cause: `parseSaturatedNatural` returns the number of characters consumed, not an error code. The caller checks `== 0` (line 284) but does not verify the entire header value was consumed. For `0x10`, only the leading `0` is consumed, setting `contentLength = 0`. The remaining `x10` is ignored, so the server reads zero body bytes. The 16 bytes of "body" data remain in the socket buffer and are interpreted as the start of the next request. Same issue for `5abc` → parses as `5`.
+  Exploitability: remote, unauthenticated; enables HTTP request smuggling when a front-end proxy parses the full value differently
+  Classification: CONFIRMED
+
+F-004: Malformed request line reuses stale URL and protocol
+  Type: logic
+  Location: asynchttpserver.nim:216-249
+  Input: `GET\r\n` or `GET /\r\n` sent on a persistent connection after a valid request
+  Root cause: `lineFut.mget.split(' ')` iterates over parts; the `case i` handles `i = 0, 1, 2` but the loop does not validate that `i == 3` after it finishes. If fewer than 3 parts are present, execution falls through to header parsing. `url` and `protocol` are never reset between requests (only `headers.clear()` and `body = ""` at lines 189-190), so the missing fields inherit stale values from the previous request on the same connection.
+  Exploitability: on an established persistent connection, an attacker can cause the callback to process a request with a URL and protocol chosen by a prior legitimate request
+  Classification: CONFIRMED
+
+F-005: Missing recv timeouts enable slowloris DoS
+  Type: DoS
+  Location: asynchttpserver.nim:203, 256, 291, 309, 323, 326
+  Input: TCP connection sending one byte every 30 seconds
+  Root cause: Every network read (`recvLineInto` at lines 203 and 256; `recv` at lines 291, 323, 326) is performed without any timeout. A client can hold a connection open indefinitely by sending data slowly enough to stay below `maxLine` limits while never completing a full request line, header, or body. This exhausts async event-loop resources and file descriptors.
+  Exploitability: remote, unauthenticated; classic slowloris/resource-exhaustion attack
+  Classification: CONFIRMED

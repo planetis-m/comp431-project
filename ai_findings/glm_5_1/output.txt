@@ -1,0 +1,95 @@
+Now let me read `parseutils.nim` to understand `parseSaturatedNatural` and `parseHexInt`:Now let me check `parseHex` in parseutils to understand what `parseHexInt` ultimately calls, and look at the `recvLineInto` implementation:Now let me check the `split(' ')` behavior and `parseUri`:Now I have a thorough understanding of the code. Let me compile my findings.
+
+---
+
+F-001: Chunked body unbounded — maxBody not enforced during chunked transfer
+  Type: DoS
+  Location: asynchttpserver.nim:295-331
+  Input: POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\nFFFFFF\r\n...<16MB>...\r\n0\r\n\r\n
+  Root cause: The Content-Length path (line 288) checks `contentLength > server.maxBody`, but the chunked encoding path (line 295-331) has no analogous check. `request.body.add(chunk)` at line 324 accumulates without any size limit. An attacker can send unlimited data via chunked encoding, exhausting server memory.
+  Exploitability: Remote, no auth needed, high impact — unbounded memory consumption leading to OOM
+  Classification: CONFIRMED
+
+F-002: parseHexInt overflow in chunked encoding yields negative bytesToRead
+  Type: logic
+  Location: asynchttpserver.nim:311
+  Input: POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n7FFFFFFF\r\n...\r\n0\r\n\r\n
+  Root cause: `parseHexInt` delegates to `parseutils.parseHex` which documents "It does not check for overflow. If the value represented by the string is too big to fit into number, only the value of last fitting characters will be stored." A hex string like "7FFFFFFF" (2^31-1 = max int32) or "80000000" (overflows int on 32-bit) results in undefined/wrapped values. On a 64-bit system, a very large hex value produces a huge positive `bytesToRead`, which then calls `client.recv(bytesToRead)` — potentially trying to receive gigabytes. On a 32-bit system, overflow wraps negative, and `recv` with a negative count has undefined behavior. Combined with F-001, there is no body size guard.
+  Exploitability: Remote, no auth needed, DoS via massive recv or undefined behavior
+  Classification: LIKELY
+
+F-003: Split-on-space request line yields wrong method/URI/protocol with extra spaces
+  Type: logic
+  Location: asynchttpserver.nim:218
+  Input: GET  /path  HTTP/1.1\r\n (two spaces between each part)
+  Root cause: `split(' ')` produces empty strings for consecutive spaces (per strutils split semantics). With `"GET  /path  HTTP/1.1"`, split produces `["GET", "", "/path", "", "HTTP/1.1"]`. The case statement at i=1 receives `""` (empty string) for URI, i=2 receives `"/path"`, i=3 receives `""` and hits the `else` branch returning Http400. A valid per-RFC request line with multiple SP characters is rejected. Conversely, `"GET /path HTTP/1.1 extra"` (4 parts) also hits `else` at i=3 — but that is a malformed request. The real issue is that valid requests with extra spaces (some HTTP implementations tolerate this) are broken.
+  Exploitability: Remote, no auth, causes false rejection of requests — low security impact but protocol non-compliance
+  Classification: CONFIRMED
+
+F-004: Expect header "100-continue" check uses case-sensitive `in` operator
+  Type: logic
+  Location: asynchttpserver.nim:275
+  Input: POST / HTTP/1.1\r\nExpect: 100-Continue\r\n\r\n
+  Root cause: Line 275 checks `if "100-continue" in request.headers["Expect"]`. The `in` operator on `HttpHeaderValues` (httpcore.nim:212-217) does case-insensitive comparison via `val.toLowerAscii`, so this actually works correctly. However, the string literal `"100-continue"` is lowercase, and the `contains` func lowercases both sides, so this is fine. — Withdrawn on analysis.
+
+F-005: No recv timeout — slowloris-style connection hold
+  Type: DoS
+  Location: asynchttpserver.nim:203
+  Input: Open TCP connection, send partial request byte-by-byte with delays
+  Root cause: Line 203 has a `# TODO: Timeouts.` comment. `recvLineInto` has no timeout, so an attacker can hold a connection open indefinitely by sending data very slowly (one byte every few seconds). Combined with the per-connection processing model, each held-open connection consumes a file descriptor and server resources. With enough slow connections, the server exhausts FDs and cannot accept new legitimate requests.
+  Exploitability: Remote, no auth needed, classic slowloris DoS
+  Classification: CONFIRMED
+
+F-006: parseProtocol crashes on "HTTP/" with no version digits
+  Type: crash
+  Location: asynchttpserver.nim:155-157
+  Input: GET / HTTP/\r\n\r\n
+  Root cause: `skipIgnoreCase("HTTP/")` returns 5 (success), so `i=5`. Then `parseSaturatedNatural(result.major, i=5)` on the string "HTTP/" — position 5 is past the end, so `parseSaturatedNatural` returns 0 and doesn't modify `result.major` (which stays at 0 from `default`). Then `i.inc` at line 156 advances to 6, and `parseSaturatedNatural(result.minor, i=6)` is called past the end, also returns 0. No crash actually occurs — it silently accepts "HTTP/" as version 0.0. The protocol check at line 346 compares against HttpVer11/HttpVer10, both have major=1, so it falls through to the close path. This is incorrect but not a crash.
+  Exploitability: Remote, no auth, incorrect protocol version accepted (0.0), connection closed — low impact
+  Classification: LIKELY
+
+F-007: parseProtocol index out of bounds on "HTTP/X" (dot replaced by other char)
+  Type: crash
+  Location: asynchttpserver.nim:156
+  Input: GET / HTTP/1X1\r\n\r\n
+  Root cause: After `parseSaturatedNatural` parses "1" at position 5, i=6. Line 156 does `i.inc` unconditionally to skip the dot separator, advancing to i=7. But if the character at position 6 is not a dot (e.g., "X"), the increment still happens and `parseSaturatedNatural` at line 157 starts at the wrong position. With "HTTP/1", i=6 after parsing "1", `i.inc` makes i=7 which is past the end for this 6-char string. `parseSaturatedNatural` handles out-of-bounds gracefully (returns 0). No crash, but the dot is not validated.
+  Exploitability: Remote, no auth, accepts malformed protocol strings — low impact
+  Classification: LIKELY
+
+F-008: Header with no colon produces empty key — stored in headers table
+  Type: logic
+  Location: asynchttpserver.nim:264, httpcore.nim:244-262
+  Input: BadHeader\r\n (a header line with no colon character)
+  Root cause: `parseHeader` at httpcore.nim:251 does `parseUntil(result.key, ':')` which returns 0 characters if ':' is the first char, or returns the whole string if no ':' exists. If no colon is found, `i` equals the full length, `inc(i)` goes past the end, and `i < len(line)` is false. With `result.key.len > 0` (the full string becomes the key), `result.value = @[""]` is set. This garbage header gets stored in the headers table. The header loop continues without error, allowing arbitrary non-header lines to pollute the headers.
+  Exploitability: Remote, no auth, header injection/pollution — could confuse application logic that iterates headers
+  Classification: CONFIRMED
+
+F-009: Content-Length saturation to int.high bypasses maxBody on 64-bit
+  Type: DoS
+  Location: asynchttpserver.nim:284-291
+  Input: POST / HTTP/1.1\r\nContent-Length: 999999999999999999999\r\n\r\n
+  Root cause: `parseSaturatedNatural` saturates to `high(int)` on overflow (2^63-1 on 64-bit). The check at line 288 `contentLength > server.maxBody` correctly catches this (since int.high >> 8MB default maxBody). However, `client.recv(contentLength)` at line 291 is called with `contentLength` still at the checked value. If `maxBody` is configured to a very large value (or the default 8MB), and a legitimate Content-Length within maxBody is provided, recv works correctly. The saturation itself is not the vulnerability — the check at 288 is correct. — Withdrawn; maxBody check is effective.
+
+F-010: FutureVar[Request] shared across loop iterations without synchronization
+  Type: logic
+  Location: asynchttpserver.nim:362-374
+  Input: Two concurrent HTTP/1.1 keep-alive pipelined requests
+  Root cause: `request` and `lineFut` are `FutureVar` objects allocated once and reused across the `while not client.isClosed` loop. `processRequest` clears headers and body at lines 189-190, but the `req` parameter is a `FutureVar[Request]` — if a callback is still running asynchronously from a previous request (via `asyncCheck` or a long-running handler), and the loop processes the next request, the shared `request` object gets mutated under the callback. However, since `processRequest` uses `await callback(request)` at line 337, it waits for the callback to complete before returning, so there's no overlap within a single connection. Between different connections, each gets its own `request` and `lineFut` in `processClient`. No race condition exists in practice.
+  Exploitability: Not exploitable — single-threaded async model prevents concurrent access to the same FutureVar
+  Classification: SPECULATIVE — not a real vulnerability
+
+---
+
+### Summary of Confirmed/Likely Findings
+
+| ID | Type | Severity | Confidence |
+|---|---|---|---|
+| F-001 | DoS — unbounded chunked body | High | CONFIRMED |
+| F-002 | Logic — parseHexInt overflow in chunk size | Medium | LIKELY |
+| F-003 | Logic — split(' ') breaks valid requests | Low | CONFIRMED |
+| F-005 | DoS — no recv timeout (slowloris) | High | CONFIRMED |
+| F-006 | Logic — missing protocol version accepted | Low | LIKELY |
+| F-007 | Logic — dot separator not validated | Low | LIKELY |
+| F-008 | Logic — header without colon stored as key | Medium | CONFIRMED |
+
+**F-001 is the most severe**: any remote attacker can exhaust server memory by sending chunked POST data without any Content-Length, completely bypassing the `maxBody` limit that protects the Content-Length path.

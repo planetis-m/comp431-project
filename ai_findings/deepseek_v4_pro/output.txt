@@ -1,0 +1,83 @@
+Now let me check a few remaining behavioral details before compiling findings:Now I have a thorough understanding of the code. Let me verify one last detail about the chunked encoding separator behavior:Here are my findings:
+
+---
+
+**F-001: Chunked encoding: no maxBody enforcement — unbounded memory growth**
+  Type: DoS
+  Location: asynchttpserver.nim:324
+  Input: `POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n<hex-size>\r\n<data>\r\n...` (infinite loop of non-zero chunks)
+  Root cause: The Content-Length path enforces `contentLength > server.maxBody` at line 288 and rejects with 413. The chunked encoding path at lines 295–331 has no equivalent check — `request.body.add(chunk)` at line 324 grows the body string without bound. An attacker can send an endless stream of non-zero-size chunks, exhausting server memory.
+  Exploitability: remote, unauthenticated, single connection can consume all available RAM
+  Classification: CONFIRMED
+
+---
+
+**F-002: No recv timeouts — Slowloris DoS**
+  Type: DoS
+  Location: asynchttpserver.nim:203
+  Input: `GET / HTTP/1.1\r\n` (then never send `\r\n`, trickling bytes slowly)
+  Root cause: `client.recvLineInto` at lines 203, 256, and 309 has no timeout. The code itself acknowledges this at line 203 with a `# TODO: Timeouts.` comment. An attacker can open many connections and send bytes at arbitrarily slow rates, exhausting connection/file-descriptor resources. This applies to request-line reading, header reading, and chunk-size-line reading.
+  Exploitability: remote, unauthenticated, classic Slowloris — hold connections open indefinitely
+  Classification: CONFIRMED
+
+---
+
+**F-003: headerLimit check fires after headers are already stored — pre-rejection memory DoS**
+  Type: DoS
+  Location: asynchttpserver.nim:267
+  Input: 10,000 distinct `X-N-<i>: ` + 8192 bytes of value repeated per header line (total ~82 MB of raw input)
+  Root cause: The header-reading loop at lines 252–270 calls `request.headers[key] = value` at line 265 *before* the length check at line 267. The check `request.headers.len > headerLimit` (where `headerLimit = 10000`, httpcore.nim:120) uses `>` rather than `>=`, so exactly 10,000 headers are stored before rejection. Each header value can be up to `maxLine` (8192) bytes. A single connection can force the server to allocate ~80+ MB in the headers table before the 400 response is sent.
+  Exploitability: remote, unauthenticated, bounded but significant memory pressure (one connection ≈ 80 MB)
+  Classification: LIKELY
+
+---
+
+**F-004: Connection header multi-value handling inconsistency**
+  Type: logic
+  Location: asynchttpserver.nim:339 vs 346–349
+  Input: `GET / HTTP/1.1\r\nConnection: keep-alive, close\r\n\r\n`
+  Root cause: The `"upgrade" in request.headers.getOrDefault("connection")` check at line 339 uses `contains` (httpcore.nim:212–217), which iterates *all* comma-separated values correctly. But the persistent-connection logic at lines 346–349 calls `cmpIgnoreCase(request.headers.getOrDefault("connection"), "close")`, which triggers the `toString` converter (httpcore.nim:170–171) that returns only `seq[string](values)[0]` — the first value. A `Connection: keep-alive, close` header forces HTTP/1.1 keep-alive even though "close" is present. Conversely, `Connection: close, keep-alive` would be seen as "close" for HTTP/1.1 but "upgrade" hidden in position >0 would be missed by the upgrade check at line 339? No — line 339 uses `contains` which checks all values. The inconsistency is: *upgrade* works correctly with multi-value, but *close* and *keep-alive* decisions only inspect the first value.
+  Exploitability: remote, unauthenticated, evades connection-close directives
+  Classification: LIKELY
+
+---
+
+**F-005: Chunked transfer encoding restricted to POST only — silent body loss for PUT/PATCH**
+  Type: logic
+  Location: asynchttpserver.nim:170
+  Input: `PUT / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n...`
+  Root cause: `hasChunkedEncoding` (lines 162–171) returns `request.reqMethod == HttpPost` as its final predicate. For PUT, PATCH, DELETE, or extension methods with `Transfer-Encoding: chunked`, the function returns `false`. The body-reading cascade then falls to line 332: `elif request.reqMethod == HttpPost` — which triggers 411 only for POST. For non-POST methods, no error is sent and the body is silently empty when the callback fires. An application expecting chunked PUT bodies would receive zero-length bodies without any error indication.
+  Exploitability: remote, unauthenticated, loss of request body data
+  Classification: LIKELY
+
+---
+
+**F-006: Chunked encoding "chunked" check is case-sensitive**
+  Type: logic
+  Location: asynchttpserver.nim:168
+  Input: `POST / HTTP/1.1\r\nTransfer-Encoding: CHUNKED\r\n\r\n...`
+  Root cause: The comparison `"chunked" == encoding.strip` at line 168 is exact (case-sensitive). RFC 7230 §4 requires transfer coding names to be case-insensitive. A client sending `Transfer-Encoding: CHUNKED` or `Chunked` falls through to the 411 response for POST, or silent body loss for non-POST methods. While not a direct DoS vector, it means a conforming client sending chunked data may have its body silently rejected.
+  Exploitability: remote, unauthenticated, interoperability failure
+  Classification: LIKELY
+
+---
+
+**F-007: split(' ') pre-allocates strings for all space-delimited parts**
+  Type: DoS
+  Location: asynchttpserver.nim:218
+  Input: Request line padded with 8191 space characters: `GET / HTTP/1.1` + spaces
+  Root cause: `lineFut.mget.split(' ')` at line 218 allocates one `string` per space-delimited segment *before* the `for` loop body executes. The loop exits at `case i` → `else` (i ≥ 3) after processing 4 parts, but `split` has already allocated ~8000 empty strings. This is bounded by `maxLine` = 8192, so the worst case is approximately 8000 heap allocations (each a short empty string). Impact is limited by maxLine but still notable for repeated requests.
+  Exploitability: remote, unauthenticated, bounded allocation amplification (~8000 strings per request)
+  Classification: SPECULATIVE
+
+---
+
+**F-008: parseProtocol silently accepts HTTP/ with no version digits**
+  Type: logic
+  Location: asynchttpserver.nim:155–157
+  Input: `GET / HTTP/\r\n`
+  Root cause: `parseProtocol` at lines 148–157 calls `skipIgnoreCase("HTTP/")` which returns 5 and passes the guard. Then `parseSaturatedNatural(protocol, result.major, i)` at index 5 (past end of "HTTP/") returns 0 because `toOpenArray(5, 4)` is empty. Same for the minor version. Result: `(orig: "HTTP/", major: 0, minor: 0)` with no error raised. The request is processed normally, then the persistent-connection check treats it as neither HTTP/1.1 nor HTTP/1.0 and closes the connection. No crash, but silently accepting a malformed protocol line is a robustness gap.
+  Exploitability: remote, unauthenticated, no crash — only minor logic quirk
+  Classification: SPECULATIVE
+
+---

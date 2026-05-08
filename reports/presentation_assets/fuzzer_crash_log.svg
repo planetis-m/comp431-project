@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="720" viewBox="0 0 1280 720" role="img" aria-labelledby="title desc">
+  <title id="title">Fuzzer crash evidence</title>
+  <desc id="desc">Terminal-style view of libFuzzer finding the HTTP slash crash input.</desc>
+  <rect width="1280" height="720" fill="#111827"/>
+  <text x="70" y="86" font-family="Inter, Arial, sans-serif" font-size="42" font-weight="700" fill="#f9fafb">The fuzzer produced replayable evidence</text>
+  <text x="72" y="126" font-family="Inter, Arial, sans-serif" font-size="22" fill="#cbd5e1">The important result is not a score. It is the exact saved input.</text>
+
+  <rect x="86" y="174" width="1108" height="430" rx="14" fill="#0b1020" stroke="#334155" stroke-width="3"/>
+  <g font-family="JetBrains Mono, Consolas, monospace" font-size="27">
+    <text x="126" y="238" fill="#8bd5ff">#47319 REDUCE cov: 3840 ft: 11321 corp: 348/4129b</text>
+    <text x="126" y="294" fill="#fbbf24">SUMMARY: libFuzzer: fuzz target exited</text>
+    <text x="126" y="350" fill="#e5e7eb">artifact_prefix='experiments/fuzzing/results/'</text>
+    <text x="126" y="406" fill="#e5e7eb">Base64: MEhUVFAv</text>
+    <text x="126" y="462" fill="#fca5a5">Saved bytes: 30 48 54 54 50 2f</text>
+    <text x="126" y="518" fill="#86efac">ASCII: 0HTTP/</text>
+  </g>
+
+  <rect x="768" y="500" width="340" height="62" rx="10" fill="#172554" stroke="#60a5fa" stroke-width="3"/>
+  <text x="808" y="541" font-family="Inter, Arial, sans-serif" font-size="26" font-weight="700" fill="#f9fafb">payload = HTTP/</text>
+</svg>
