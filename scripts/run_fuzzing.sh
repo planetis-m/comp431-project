@@ -10,38 +10,22 @@ trap 'rm -rf "$WORKDIR"' EXIT
 
 scripts/build_fuzzers.sh
 
-mkdir -p "$WORKDIR/corpus" "$WORKDIR/results/original" "$WORKDIR/results/fixed"
+mkdir -p "$WORKDIR/corpus" "$WORKDIR/results"
 cp experiments/fuzzing/corpus/* "$WORKDIR/corpus/"
 
 set +e
 ASAN_OPTIONS=detect_leaks=0 \
   experiments/fuzzing/harness/asynchttpserver_fuzzer \
+  -print_final_stats=1 \
   -max_total_time="$MAX_TIME" \
-  -artifact_prefix="$WORKDIR/results/original/" \
+  -artifact_prefix="$WORKDIR/results/" \
   "$WORKDIR/corpus" \
-  > "$WORKDIR/results/original/run.log" 2>&1
-ORIGINAL_STATUS=$?
+  > "$WORKDIR/results/run.log" 2>&1
+STATUS=$?
 set -e
 
-ASAN_OPTIONS=detect_leaks=0 \
-  experiments/fuzzing/harness/asynchttpserver_fuzzer_fixed \
-  -runs=1 \
-  experiments/fuzzing/results/F-001_crash_input \
-  > "$WORKDIR/results/fixed/replay.log" 2>&1
-
-ASAN_OPTIONS=detect_leaks=0 \
-  experiments/fuzzing/harness/asynchttpserver_fuzzer_fixed \
-  -max_total_time="$MAX_TIME" \
-  "$WORKDIR/corpus" \
-  > "$WORKDIR/results/fixed/run.log" 2>&1
-
 echo "Temporary results: $WORKDIR"
-echo "Original harness exit code: $ORIGINAL_STATUS"
-echo "Original run summary:"
-grep -E "ERROR|SUMMARY|DONE|artifact_prefix|Base64|#[0-9]+.*(REDUCE|NEW|DONE)" "$WORKDIR/results/original/run.log" | tail -n 20 || true
-echo
-echo "Fixed harness replay summary:"
-tail -n 8 "$WORKDIR/results/fixed/replay.log"
-echo
-echo "Fixed harness run summary:"
-grep -E "ERROR|SUMMARY|DONE|#[0-9]+.*DONE" "$WORKDIR/results/fixed/run.log" | tail -n 20 || true
+echo "Harness exit code: $STATUS"
+echo "Run summary:"
+grep -E "ERROR|SUMMARY|DONE|artifact_prefix|Base64|stat::number_of_executed_units|#[0-9]+.*(REDUCE|NEW|DONE)" \
+  "$WORKDIR/results/run.log" | tail -n 24 || true

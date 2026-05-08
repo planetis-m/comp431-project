@@ -16,4 +16,3 @@ COMMON=(
 )
 
 nim c "${COMMON[@]}" experiments/fuzzing/harness/asynchttpserver_fuzzer.nim
-nim c "${COMMON[@]}" experiments/fuzzing/harness/asynchttpserver_fuzzer_fixed.nim

@@ -6,7 +6,7 @@
 |---:|---|---:|
 | 1 | Motivation and research question | 0:45 |
 | 2 | Target and threat model | 0:55 |
-| 3 | What fuzzing means here | 1:00 |
+| 3 | What fuzzing means here — with real commands | 1:00 |
 | 4 | Confirmed fuzzing result | 1:10 |
 | 5 | AI review setup and results | 1:15 |
 | 6 | Fuzzing vs AI comparison | 1:00 |
@@ -23,6 +23,7 @@ On slide:
   Firefox.
 - Project question: can a small student audit reproduce the same pattern?
 - Target: Nim `std/asynchttpserver`.
+- Bonus: the bug we found has since been fixed upstream (Nim PR #25793).
 
 Suggested visual:
 
@@ -37,7 +38,10 @@ bugs." Mozilla describes a pipeline where models generate hypotheses and test
 cases, then the team validates and ships fixes. That motivated my project. I
 wanted to compare two techniques we can run locally: coverage-guided fuzzing
 and LLM-assisted code review. The question is which technique gives better
-evidence on a smaller target.
+evidence on a smaller target. As a bonus, the specific bug we found was later
+fixed upstream in the Nim compiler repository — which means our methodology
+found a real, previously existing vulnerability, not just a theoretical edge
+case.
 
 ## Slide 2: Target and Threat Model
 
@@ -50,7 +54,9 @@ On slide:
   - memory exhaustion,
   - connection exhaustion,
   - parser logic mistakes.
-- Scope: local defensive testing only.
+- Scope: local defensive testing on an intentionally older Nim version — this
+  is an educational vulnerability discovery exercise, not an exploitation
+  attempt.
 
 Suggested visual:
 
@@ -61,19 +67,29 @@ Speaker notes:
 The target is not a full production deployment. I focused on parser code inside
 Nim's asynchronous HTTP server. The attacker controls the bytes in the request
 line, headers, and body. That is enough to test denial of service and parsing
-logic. I did not test a real remote machine, and I did not claim remote code
-execution. The goal was to produce reproducible local evidence.
+logic. We used an older Nim version intentionally — the goal is to study how
+bugs are found, not to exploit someone's deployment. I did not test a real
+remote machine. The goal was to produce reproducible local evidence.
 
 ## Slide 3: What Fuzzing Means Here
 
 On slide:
 
-- Fuzzing means automatically trying many malformed inputs.
-- libFuzzer is coverage-guided:
-  - mutate input,
-  - run parser,
-  - keep inputs that reach new code,
-  - stop on crash.
+- Fuzzing = automatically trying many malformed inputs.
+- libFuzzer is coverage-guided: mutate input → run parser → keep inputs that
+  reach new code → stop on crash.
+- The build command (explained):
+
+```bash
+nim c --cc:clang -d:noSignalHandler -d:useMalloc --noMain:on \
+  --passC:-fsanitize=fuzzer,address,undefined \
+  --passL:-fsanitize=fuzzer,address,undefined \
+  experiments/fuzzing/harness/asynchttpserver_fuzzer.nim
+```
+
+- Key flags: `--cc:clang` (needed for libFuzzer), `-d:useMalloc` (for ASan
+  instrumentation), `--noMain:on` (libFuzzer provides main), sanitizer flags
+  detect buffer overflows and undefined behavior.
 - Harness modes:
 
 | Mode | Parser |
@@ -90,11 +106,15 @@ Suggested visual:
 
 Speaker notes:
 
-Fuzzing is basically automated bug hunting through inputs. Instead of manually
+Fuzzing is automated bug hunting through mutated inputs. Instead of manually
 typing strange HTTP requests, libFuzzer mutates a small corpus and watches which
-inputs reach new code. If an input crashes the program, libFuzzer saves that
-input. My harness used a first byte as a mode selector. That let one fuzzing
-binary exercise several parser paths without starting a real network server.
+inputs reach new code. The build command is important to understand: we use
+Clang because libFuzzer is part of the LLVM project. We disable Nim's signal
+handlers so AddressSanitizer can detect the crash. We use the system malloc so
+ASan can instrument memory operations. And we tell Nim not to generate a main
+function because libFuzzer provides its own. The harness uses a first byte as a
+mode selector — this lets one fuzzing binary exercise several parser paths
+without starting a real network server.
 
 ## Slide 4: Confirmed Finding
 
@@ -114,17 +134,28 @@ Fuzzer artifact:
 0HTTP/
 ```
 
-Key code pattern:
+Key code pattern (vulnerable version):
 
 ```nim
 var i = protocol.skipIgnoreCase("HTTP/")
 if i != 5:
   raise ValueError
 i.inc protocol.parseSaturatedNatural(result.major, i)
-if i < protocol.len:
-  inc i
+i.inc             # ← unconditional dot skip
 i.inc protocol.parseSaturatedNatural(result.minor, i)
 ```
+
+The fix (merged upstream as PR #25793):
+
+```nim
+if i < protocol.len: inc i   # ← guard the skip
+```
+
+Verification:
+- Direct reproducer: 16-line Nim program confirms crash
+- Fuzzer: found after 47,319 executions, saved exact input
+- Replay: same input against fixed binary → no crash
+- Upstream: Nim project merged identical one-line fix
 
 Suggested visual:
 
@@ -135,27 +166,31 @@ Suggested visual:
 Speaker notes:
 
 The confirmed bug is small but real. The parser checks that the string starts
-with `HTTP/`, but it does not check that there are digits after the slash. For
-the input `HTTP/`, the index is already at the end of the string after the
-first numeric parse. The original code then increments the index anyway to skip
-a dot that is not present. The next numeric parse starts beyond the string and
-raises `IndexDefect`, which escapes and can crash the process.
+with `HTTP/`, but after the prefix check passes, there's an unconditional `i.inc`
+meant to skip the dot between major and minor version. For the input `HTTP/`,
+the index is already at the end of the string. The unconditional increment moves
+it past the end, and the next numeric parse raises `IndexDefect`. The caller
+only catches `ValueError`, so the defect escapes and crashes the process.
 
-Evidence:
+We verified this is real — not a harness artifact or false positive — in several
+ways. First, a 16-line standalone Nim reproducer triggers the same crash without
+the fuzzer. Second, the fuzzer and reproducer agree on the exact input. Third,
+applying the minimal fix (one if-guard) makes the crash go away. And fourth, the
+Nim project merged this exact fix as PR #25793, confirming it was a genuine bug.
 
+Evidence summary:
 - Fuzzer found it after 47,319 executions.
-- Saved crash bytes: `30 48 54 54 50 2f`.
-- Base64: `MEhUVFAv`.
-- Fixed harness replayed the same input with the minimal `if i < protocol.len`
-  guard and no crash.
+- Saved crash bytes: `30 48 54 54 50 2f` (ASCII: `0HTTP/`).
+- Fixed harness replayed the same input with no crash.
 - Fixed fuzzing run completed 625,582 executions in 61 seconds.
+- Upstream fix: `i.inc # Skip .` → `if i < protocol.len: inc i # Skip .`
 
 ## Slide 5: AI Review Results
 
 On slide:
 
 | Model | Candidates | Confirmed | Likely | Main problem |
-|---|---:|---:|---:|---|
+|---|---|---:|---:|---:|---|
 | DeepSeek V4 Pro | 8 | 0 | 6 | Misread `HTTP/` |
 | GLM-5.1 | 10 | 0 | 5 | Misread `HTTP/` |
 | Kimi K2.6 | 5 | 0 | 5 | Over-claimed confirmation |
@@ -168,6 +203,9 @@ Useful likely findings:
 - partial `Content-Length` parsing,
 - persistent-connection parser state issues.
 
+AI workflow: one structured prompt → three models → manual validation against
+source code and fuzzing evidence.
+
 Suggested visual:
 
 - `reports/presentation_assets/model_results.svg`
@@ -175,12 +213,21 @@ Suggested visual:
 Speaker notes:
 
 The AI models were useful, but not as direct proof. I used one structured
-prompt asking for location, trigger input, root cause, and exploitability. All
-usable outputs needed manual validation. DeepSeek and GLM noticed the `HTTP/`
-area, but both concluded the opposite of reality: they said it would be
-accepted as version 0.0. Kimi missed that confirmed crash and marked all its
-own findings as confirmed, even though I did not have reproducers. So I counted
-the AI results as likely findings, not confirmed vulnerabilities.
+prompt asking for location, trigger input, root cause, and exploitability. The
+key step most people skip is validation: every AI finding was manually checked
+against the source code and fuzzing evidence before being classified.
+
+Here's the striking result: DeepSeek and GLM both noticed the `HTTP/` area, but
+both concluded the opposite of reality — they said it would be accepted as
+version 0.0 without crashing. Kimi missed that confirmed crash entirely. Yet all
+three models correctly identified broader resource-exhaustion issues (missing
+timeouts, unbounded chunked body growth) that my small parser harness doesn't
+fully model.
+
+The takeaway for a student learning about security tools: an AI's confidence
+level has nothing to do with correctness. The model that sounded most certain
+about `HTTP/` was also the most wrong. Every claim needs independent
+verification.
 
 ## Slide 6: Which Was Better?
 
@@ -197,7 +244,7 @@ Conclusion from experiment:
 
 - Fuzzing was better for confirmed evidence.
 - AI was better for generating an audit checklist.
-- Best workflow: AI hypotheses plus fuzzing/reproducers.
+- Best workflow: AI hypotheses + fuzzing/reproducers.
 
 Suggested visual:
 
@@ -209,36 +256,49 @@ For this project, fuzzing was better at proving a bug. It produced an exact
 input and a replayable result. The AI models were still valuable because they
 pointed to broader resource-exhaustion issues that my small parser harness did
 not fully model, especially slow clients and chunked body growth. But the AI
-outputs were not enough on their own. This supports Mozilla's broader idea of a
-validated pipeline, not the idea that model output should be trusted directly.
+outputs were not enough on their own.
+
+The important distinction for anyone learning about security testing: a fuzzer
+gives you runtime evidence (this input crashes the program). An AI gives you
+static reasoning (this code looks suspicious). Both are tools in the toolbox,
+but only one of them provides direct proof. This supports Mozilla's broader idea
+of a validated pipeline: AI proposes, fuzzer tests, developer validates.
 
 ## Slide 7: Final Takeaway
 
 On slide:
 
-- Found one confirmed denial-of-service bug.
-- Fuzzing gave the strongest evidence.
-- AI review found useful leads but required correction.
+- Found one confirmed denial-of-service bug — now fixed upstream (PR #25793).
+- Fuzzing gave the strongest evidence: exact input, replayable crash, verified
+  fix.
+- AI review found useful leads but required correction — zero confirmed bugs
+  from AI alone.
 - External lesson: modern security work is becoming a pipeline:
   - model proposes,
   - harness tests,
   - developer validates,
   - minimal fix is replayed.
+- Key takeaway for students: tools produce leads, not conclusions. A finding
+  is only confirmed when you can reproduce it.
 
 Suggested visual:
 
-- Reuse `reports/presentation_assets/evidence_pipeline.svg`, or use a plain
-  closing slide with the sentence: "Model proposes, harness tests, developer
-  validates."
+- `reports/presentation_assets/evidence_pipeline.svg`, or a plain closing slide
+  with the sentence: "Model proposes, harness tests, developer validates."
 
 Speaker notes:
 
 My final conclusion is that the tools are complementary. The fuzzer was the
 best bug prover. The models were useful reviewers, but they needed validation
-before their findings meant anything. My experiment is much smaller than
-Mozilla's Firefox work, but it upholds the same engineering lesson: the useful
-unit is not "AI found a bug." The useful unit is a reproducible pipeline that
-turns a suspicious idea into a tested input and then a verified fix.
+before their findings meant anything. The fact that the upstream Nim project
+merged the exact fix we identified gives me confidence that our methodology was
+sound — we found a real bug using techniques that any student can learn.
+
+The main lesson I hope other students take from this: a finding is not confirmed
+because a tool reported it, or because a model sounded confident. A finding is
+confirmed because you can reproduce it. The useful unit in security research is
+not "AI found a bug" or "the fuzzer crashed." The useful unit is a reproducible
+pipeline that turns a suspicious idea into a tested input and a verified fix.
 
 ## References
 
@@ -251,3 +311,5 @@ turns a suspicious idea into a tested input and then a verified fix.
   https://clang.llvm.org/docs/AddressSanitizer.html
 - OWASP Foundation, "Fuzzing":
   https://owasp.org/www-community/Fuzzing
+- Nim PR #25793, "fixes DOS via malformed HTTP protocol":
+  https://github.com/nim-lang/Nim/pull/25793

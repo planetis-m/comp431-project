@@ -1,11 +1,15 @@
 import std/[httpcore, parseutils, strutils, uri]
 
-const localMaxBody = 8 * 1024 * 1024
+const
+  localMaxBody = 8 * 1024 * 1024
+  localMaxLine = 8 * 1024
 
-type RequestLine = object
+type ParsedRequest = object
   reqMethod: HttpMethod
-  url: Uri
+  headers: HttpHeaders
   protocol: tuple[orig: string, major, minor: int]
+  url: Uri
+  body: string
 
 proc parseProtocolOriginal(protocol: string): tuple[orig: string, major, minor: int] =
   result = default(tuple[orig: string, major, minor: int])
@@ -31,58 +35,100 @@ proc parseMethod(part: string): HttpMethod =
   else:
     raise newException(ValueError, "unknown method")
 
-proc parseRequestLineOriginal(line: string): RequestLine =
+proc nextLine(input: string, pos: var int): string =
+  if pos >= input.len:
+    return ""
+
+  let start = pos
+  while pos < input.len and input[pos] notin {'\r', '\n'}:
+    inc pos
+
+  result = input[start ..< pos]
+
+  if pos < input.len and input[pos] == '\r':
+    inc pos
+    if pos < input.len and input[pos] == '\n':
+      inc pos
+  elif pos < input.len and input[pos] == '\n':
+    inc pos
+
+proc hasChunkedEncoding(request: ParsedRequest): bool =
+  const transferEncoding = "Transfer-Encoding"
+
+  if request.headers.hasKey(transferEncoding):
+    for encoding in seq[string](request.headers[transferEncoding]):
+      if "chunked" == encoding.strip:
+        return request.reqMethod == HttpPost
+  return false
+
+proc parseFullRequestOriginal(input: string) =
+  var pos = 0
+  var request = ParsedRequest(headers: newHttpHeaders(), url: initUri())
+  var line = ""
+
+  for _ in 0..1:
+    line = nextLine(input, pos)
+    if line == "":
+      raise newException(ValueError, "empty request line")
+    if line.len > localMaxLine:
+      raise newException(ValueError, "request line too long")
+    if line != "":
+      break
+
   var i = 0
-  for part in line.split(' '):
+  for linePart in line.split(' '):
     case i
     of 0:
-      result.reqMethod = parseMethod(part)
+      request.reqMethod = parseMethod(linePart)
     of 1:
-      parseUri(part, result.url)
+      parseUri(linePart, request.url)
     of 2:
-      result.protocol = parseProtocolOriginal(part)
+      request.protocol = parseProtocolOriginal(linePart)
     else:
       raise newException(ValueError, "too many request line fields")
     inc i
 
-proc parseHeadersOriginal(input: string) =
-  var headers = newHttpHeaders()
-  for rawLine in input.splitLines():
-    if rawLine.len == 0:
+  while true:
+    line = nextLine(input, pos)
+    if line == "":
       break
-    let (key, value) = parseHeader(rawLine)
-    headers[key] = value
-    if headers.len > headerLimit:
+    if line.len > localMaxLine:
+      raise newException(ValueError, "header line too long")
+
+    let (key, value) = parseHeader(line)
+    request.headers[key] = value
+    if request.headers.len > headerLimit:
       raise newException(ValueError, "too many headers")
 
-proc parseContentLengthOriginal(input: string) =
-  var contentLength = 0
-  let consumed = parseSaturatedNatural(input, contentLength)
-  if consumed == 0:
-    raise newException(ValueError, "invalid content length")
-  if contentLength > localMaxBody:
-    raise newException(ValueError, "body too large")
+  if request.reqMethod == HttpPost:
+    if request.headers.hasKey("Expect"):
+      if "100-continue" notin request.headers["Expect"]:
+        raise newException(ValueError, "expectation failed")
 
-proc parseChunkSizeOriginal(input: string) =
-  discard input.strip().parseHexInt
-
-proc exercise(mode: int, payload: string) =
-  case mode
-  of 0:
-    discard parseProtocolOriginal(payload)
-  of 1:
-    discard parseRequestLineOriginal(payload)
-  of 2:
-    parseHeadersOriginal(payload)
-  of 3:
-    var parsed = initUri()
-    parseUri(payload, parsed)
-  of 4:
-    parseContentLengthOriginal(payload)
-  of 5:
-    parseChunkSizeOriginal(payload)
-  else:
-    discard
+  if request.headers.hasKey("Content-Length"):
+    var contentLength = 0
+    if parseSaturatedNatural(request.headers["Content-Length"], contentLength) == 0:
+      raise newException(ValueError, "invalid content length")
+    if contentLength > localMaxBody:
+      raise newException(ValueError, "body too large")
+    if input.len - pos < contentLength:
+      raise newException(ValueError, "content length mismatch")
+    request.body = input[pos ..< pos + contentLength]
+  elif hasChunkedEncoding(request):
+    while true:
+      line = nextLine(input, pos)
+      let bytesToRead = line.parseHexInt
+      if bytesToRead == 0:
+        break
+      if input.len - pos < bytesToRead + 2:
+        raise newException(ValueError, "truncated chunk")
+      request.body.add(input[pos ..< pos + bytesToRead])
+      pos.inc bytesToRead
+      if input[pos ..< min(pos + 2, input.len)] != "\r\n":
+        raise newException(ValueError, "bad chunk separator")
+      pos.inc 2
+  elif request.reqMethod == HttpPost:
+    raise newException(ValueError, "content length required")
 
 proc LLVMFuzzerTestOneInput(data: ptr UncheckedArray[byte], len: csize_t): cint {.
     exportc, cdecl, raises: [].} =
@@ -94,13 +140,8 @@ proc LLVMFuzzerTestOneInput(data: ptr UncheckedArray[byte], len: csize_t): cint 
   var input = newString(inputLen)
   copyMem(addr input[0], data, inputLen)
 
-  let mode = int(data[0]) mod 6
-  let payload =
-    if inputLen > 1: input[1 .. ^1]
-    else: ""
-
   try:
-    exercise(mode, payload)
+    parseFullRequestOriginal(input)
   except ValueError:
     discard
   except Defect:
