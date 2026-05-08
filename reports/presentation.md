@@ -21,9 +21,10 @@ On slide:
 - Real software is now being audited with both fuzzers and AI models.
 - Mozilla reported using Claude Mythos Preview and other models to help harden
   Firefox.
-- Project question: can a small student audit reproduce the same pattern?
+- Project question: can a small student audit reproduce the same evidence
+  pipeline?
 - Target: Nim `std/asynchttpserver`.
-- Bonus: the bug we found has since been fixed upstream (Nim PR #25793).
+- The reproduced bug has since been fixed upstream (Nim PR #25793).
 
 Suggested visual:
 
@@ -38,10 +39,9 @@ bugs." Mozilla describes a pipeline where models generate hypotheses and test
 cases, then the team validates and ships fixes. That motivated my project. I
 wanted to compare two techniques we can run locally: coverage-guided fuzzing
 and LLM-assisted code review. The question is which technique gives better
-evidence on a smaller target. As a bonus, the specific bug we found was later
-fixed upstream in the Nim compiler repository — which means our methodology
-found a real, previously existing vulnerability, not just a theoretical edge
-case.
+evidence on a smaller target. Important correction: this was not an original
+first discovery by us. The contribution is that we reproduced and validated the
+issue locally with a fuzzer, a standalone reproducer, and a fixed replay.
 
 ## Slide 2: Target and Threat Model
 
@@ -54,9 +54,9 @@ On slide:
   - memory exhaustion,
   - connection exhaustion,
   - parser logic mistakes.
-- Scope: local defensive testing on an intentionally older Nim version — this
-  is an educational vulnerability discovery exercise, not an exploitation
-  attempt.
+- Scope: local defensive testing on an intentionally older Nim version. This is
+  an educational reproduction and validation exercise, not an exploitation
+  attempt or a claim of first discovery.
 
 Suggested visual:
 
@@ -67,9 +67,10 @@ Speaker notes:
 The target is not a full production deployment. I focused on parser code inside
 Nim's asynchronous HTTP server. The attacker controls the bytes in the request
 line, headers, and body. That is enough to test denial of service and parsing
-logic. We used an older Nim version intentionally — the goal is to study how
-bugs are found, not to exploit someone's deployment. I did not test a real
-remote machine. The goal was to produce reproducible local evidence.
+logic. We used an older Nim version intentionally. The goal is to study how
+bugs can be reproduced and validated locally, not to exploit someone's
+deployment and not to claim first discovery. I did not test a real remote
+machine. The goal was to produce reproducible local evidence.
 
 ## Slide 3: What Fuzzing Means Here
 
@@ -116,11 +117,11 @@ function because libFuzzer provides its own. The harness uses a first byte as a
 mode selector — this lets one fuzzing binary exercise several parser paths
 without starting a real network server.
 
-## Slide 4: Confirmed Finding
+## Slide 4: Reproduced Runtime Crash
 
 On slide:
 
-Confirmed vulnerability: `parseProtocol("HTTP/")` crashes.
+Reproduced crash: `parseProtocol("HTTP/")` raises `IndexDefect`.
 
 Minimal payload:
 
@@ -145,17 +146,17 @@ i.inc             # ← unconditional dot skip
 i.inc protocol.parseSaturatedNatural(result.minor, i)
 ```
 
-The fix (merged upstream as PR #25793):
+The upstream fix (PR #25793):
 
 ```nim
 if i < protocol.len: inc i   # ← guard the skip
 ```
 
-Verification:
-- Direct reproducer: 16-line Nim program confirms crash
-- Fuzzer: found after 47,319 executions, saved exact input
-- Replay: same input against fixed binary → no crash
-- Upstream: Nim project merged identical one-line fix
+Local validation:
+- Direct reproducer: 16-line Nim program triggers the crash
+- Fuzzer: reproduced after 47,319 executions, saved exact input
+- Replay: same input against fixed binary has no crash
+- Upstream: Nim project already merged the same one-line fix
 
 Suggested visual:
 
@@ -165,21 +166,23 @@ Suggested visual:
 
 Speaker notes:
 
-The confirmed bug is small but real. The parser checks that the string starts
-with `HTTP/`, but after the prefix check passes, there's an unconditional `i.inc`
-meant to skip the dot between major and minor version. For the input `HTTP/`,
-the index is already at the end of the string. The unconditional increment moves
-it past the end, and the next numeric parse raises `IndexDefect`. The caller
-only catches `ValueError`, so the defect escapes and crashes the process.
+This slide is about a reproduced crash, not an original first discovery. The
+parser checks that the string starts with `HTTP/`, but after the prefix check
+passes, there's an unconditional `i.inc` meant to skip the dot between major and
+minor version. For the input `HTTP/`, the index is already at the end of the
+string. The unconditional increment moves it past the end, and the next numeric
+parse raises `IndexDefect`. The caller only catches `ValueError`, so the defect
+escapes and crashes the process.
 
-We verified this is real — not a harness artifact or false positive — in several
-ways. First, a 16-line standalone Nim reproducer triggers the same crash without
-the fuzzer. Second, the fuzzer and reproducer agree on the exact input. Third,
-applying the minimal fix (one if-guard) makes the crash go away. And fourth, the
-Nim project merged this exact fix as PR #25793, confirming it was a genuine bug.
+We validated that this is real, not a harness artifact or false positive, in
+several ways. First, a 16-line standalone Nim reproducer triggers the same crash
+without the fuzzer. Second, the fuzzer and reproducer agree on the exact input.
+Third, applying the minimal fix, one if-guard, makes the crash go away. Fourth,
+upstream PR #25793 shows this was a real Nim issue already handled by the
+maintainers.
 
 Evidence summary:
-- Fuzzer found it after 47,319 executions.
+- The local fuzzer reproduced it after 47,319 executions.
 - Saved crash bytes: `30 48 54 54 50 2f` (ASCII: `0HTTP/`).
 - Fixed harness replayed the same input with no crash.
 - Fixed fuzzing run completed 625,582 executions in 61 seconds.
@@ -214,12 +217,12 @@ Speaker notes:
 
 The AI models were useful, but not as direct proof. I used one structured
 prompt asking for location, trigger input, root cause, and exploitability. The
-key step most people skip is validation: every AI finding was manually checked
-against the source code and fuzzing evidence before being classified.
+key step most people skip is validation: every AI claim was manually checked
+against the source code and runtime evidence before being classified.
 
 Here's the striking result: DeepSeek and GLM both noticed the `HTTP/` area, but
 both concluded the opposite of reality — they said it would be accepted as
-version 0.0 without crashing. Kimi missed that confirmed crash entirely. Yet all
+version 0.0 without crashing. Kimi missed this reproduced crash entirely. Yet all
 three models correctly identified broader resource-exhaustion issues (missing
 timeouts, unbounded chunked body growth) that my small parser harness doesn't
 fully model.
@@ -235,14 +238,14 @@ On slide:
 
 | Criterion | Fuzzing | AI review |
 |---|---|---|
-| Confirmed bugs | 1 | 0 |
+| Confirmed local crashes | 1 | 0 |
 | Evidence | crash input and replay | reasoning to validate |
 | Strength | proves runtime behavior | covers broader design risks |
 | Weakness | limited by harness | can hallucinate or overstate |
 
 Conclusion from experiment:
 
-- Fuzzing was better for confirmed evidence.
+- Fuzzing was better for runtime evidence.
 - AI was better for generating an audit checklist.
 - Best workflow: AI hypotheses + fuzzing/reproducers.
 
@@ -252,7 +255,7 @@ Suggested visual:
 
 Speaker notes:
 
-For this project, fuzzing was better at proving a bug. It produced an exact
+For this project, fuzzing was better at producing proof. It produced an exact
 input and a replayable result. The AI models were still valuable because they
 pointed to broader resource-exhaustion issues that my small parser harness did
 not fully model, especially slow clients and chunked body growth. But the AI
@@ -261,17 +264,17 @@ outputs were not enough on their own.
 The important distinction for anyone learning about security testing: a fuzzer
 gives you runtime evidence (this input crashes the program). An AI gives you
 static reasoning (this code looks suspicious). Both are tools in the toolbox,
-but only one of them provides direct proof. This supports Mozilla's broader idea
-of a validated pipeline: AI proposes, fuzzer tests, developer validates.
+but only runtime evidence provides direct proof. This supports Mozilla's broader
+idea of a validated pipeline: AI proposes, fuzzer tests, developer validates.
 
 ## Slide 7: Final Takeaway
 
 On slide:
 
-- Found one confirmed denial-of-service bug — now fixed upstream (PR #25793).
+- Reproduced one denial-of-service crash, already fixed upstream (PR #25793).
 - Fuzzing gave the strongest evidence: exact input, replayable crash, verified
   fix.
-- AI review found useful leads but required correction — zero confirmed bugs
+- AI review found useful leads but required correction — zero confirmed crashes
   from AI alone.
 - External lesson: modern security work is becoming a pipeline:
   - model proposes,
@@ -289,10 +292,12 @@ Suggested visual:
 Speaker notes:
 
 My final conclusion is that the tools are complementary. The fuzzer was the
-best bug prover. The models were useful reviewers, but they needed validation
-before their findings meant anything. The fact that the upstream Nim project
-merged the exact fix we identified gives me confidence that our methodology was
-sound — we found a real bug using techniques that any student can learn.
+best proof generator. The models were useful reviewers, but they needed
+validation before their findings meant anything. The upstream Nim PR matters
+because it confirms the issue was real. But the presentation should be honest:
+we did not discover it first. Our contribution was building the local evidence
+pipeline: fuzzing harness, saved crash input, standalone reproducer, and fixed
+replay.
 
 The main lesson I hope other students take from this: a finding is not confirmed
 because a tool reported it, or because a model sounded confident. A finding is

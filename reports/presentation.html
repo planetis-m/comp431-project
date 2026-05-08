@@ -188,7 +188,7 @@
   /* slide-specific */
   .s1-grid { display: grid; grid-template-columns: 1.2fr 1fr; gap: 2rem; flex: 1; min-height: 0; align-items: center; }
   .s1-img img { width: 100%; border-radius: 14px; border: 1px solid rgba(215,222,234,.9); }
-  .slide:nth-child(4) h1::before { content: "confirmed finding"; background: rgba(200, 65, 65, .1); color: #a93636; }
+  .slide:nth-child(4) h1::before { content: "local reproduction"; background: rgba(200, 65, 65, .1); color: #a93636; }
   .slide:nth-child(5) h1::before { content: "AI validation"; background: rgba(22, 155, 136, .1); color: #087a69; }
   .slide:nth-child(7) h1::before { content: "takeaway"; background: rgba(217, 146, 43, .13); color: #9a641d; }
 
@@ -209,15 +209,15 @@
 <div id="deck">
 
   <!-- ===================== SLIDE 1 ===================== -->
-  <div class="slide active" data-notes="<u>Start with the motivation.</u><br>In May 2026, Mozilla published a post about hardening Firefox with Claude Mythos Preview.<br><br>The interesting part was <b>not</b> simply, AI found bugs.<br>It was the process.<br><br><u>Mozilla describes a pipeline.</u><br>Models propose hypotheses and test cases.<br>The team validates them.<br>Then the team ships fixes.<br><br>That motivated this project.<br>I wanted to compare two techniques we can run locally:<br><b>coverage-guided fuzzing</b>, and <b>LLM-assisted code review</b>.<br><br><u>Main question.</u><br>Which technique gives better evidence on a smaller target?<br><br>And the strongest signal is this:<br>the bug we found was later <b>merged upstream</b>.<br>So this was a real, previously existing vulnerability.">
+  <div class="slide active" data-notes="<u>Start with the motivation.</u><br>In May 2026, Mozilla published a post about hardening Firefox with Claude Mythos Preview.<br><br>The interesting part was <b>not</b> simply, AI found bugs.<br>It was the process.<br><br><u>Mozilla describes a pipeline.</u><br>Models propose hypotheses and test cases.<br>The team validates them.<br>Then the team ships fixes.<br><br>That motivated this project.<br>I wanted to compare two techniques we can run locally:<br><b>coverage-guided fuzzing</b>, and <b>LLM-assisted code review</b>.<br><br><u>Main question.</u><br>Which technique gives better evidence on a smaller target?<br><br>Important correction:<br>this was <b>not</b> an original first discovery by us.<br>The contribution here is that we reproduced and validated the same class of issue locally,<br>with a fuzzer, a standalone reproducer, and a fixed replay.">
     <h1>Why This Project Matters</h1>
     <div class="s1-grid">
       <div>
         <ul>
           <li>Real software is now being audited with both <strong>fuzzers</strong> and <strong>AI models</strong>.</li>
           <li>Mozilla reported using Claude Mythos Preview to help harden Firefox (May 2026).</li>
-          <li><strong>Project question:</strong> can a small student audit reproduce the same pattern?</li>
-          <li><strong>Target:</strong> Nim <code>std/asynchttpserver</code>. Bug we found is now <strong>fixed upstream</strong> (<a href="https://github.com/nim-lang/Nim/pull/25793">Nim PR #25793</a>).</li>
+          <li><strong>Project question:</strong> can a small student audit reproduce the same evidence pipeline?</li>
+          <li><strong>Target:</strong> Nim <code>std/asynchttpserver</code>. The reproduced bug is now <strong>fixed upstream</strong> (<a href="https://github.com/nim-lang/Nim/pull/25793">Nim PR #25793</a>).</li>
         </ul>
 
       </div>
@@ -229,14 +229,14 @@
   </div>
 
   <!-- ===================== SLIDE 2 ===================== -->
-  <div class="slide" data-notes="<u>Set the boundary first.</u><br>This target is not a production deployment.<br><br>I focused on <b>parser code</b> inside Nim's asynchronous HTTP server.<br><br>The attacker controls bytes in the request line, headers, and body.<br>That is enough to test denial of service and parser logic.<br><br><u>Important scope note.</u><br>We used an older Nim version intentionally.<br>This is an educational vulnerability discovery exercise.<br>It is <b>not</b> an exploitation attempt.<br><br>I did not test a real remote machine.<br>The goal was <b>reproducible local evidence</b>.">
+  <div class="slide" data-notes="<u>Set the boundary first.</u><br>This target is not a production deployment.<br><br>I focused on <b>parser code</b> inside Nim's asynchronous HTTP server.<br><br>The attacker controls bytes in the request line, headers, and body.<br>That is enough to test denial of service and parser logic.<br><br><u>Important scope note.</u><br>We used an older Nim version intentionally.<br>This is an educational reproduction and validation exercise.<br>It is <b>not</b> an exploitation attempt,<br>and it is <b>not</b> a claim of first discovery.<br><br>I did not test a real remote machine.<br>The goal was <b>reproducible local evidence</b>.">
     <h1>Target &amp; Threat Model</h1>
     <div class="twocol">
       <div>
         <ul>
           <li><strong>Target:</strong> request parsing in <code>std/asynchttpserver</code></li>
           <li><strong>Attacker:</strong> unauthenticated client sending malformed HTTP</li>
-          <li><strong>Note:</strong> intentionally older Nim version — educational exercise, not exploitation</li>
+          <li><strong>Note:</strong> intentionally older Nim version, educational reproduction, not exploitation</li>
         </ul>
         <h2>Main risks</h2>
         <ul>
@@ -337,12 +337,12 @@
   </div>
 
   <!-- ===================== SLIDE 4 ===================== -->
-  <div class="slide" data-notes="<u>State the finding plainly.</u><br>The confirmed bug is small,<br>but it is real.<br><br>The parser checks that the string starts with HTTP slash.<br>For the input <b>HTTP slash</b>,<br>the index is already at the end after the first numeric parse.<br><br><u>Root cause.</u><br>The original code has an <b>unconditional i dot inc</b>.<br>That line is meant to skip the dot between major and minor version.<br><br>But in this input,<br>there is <b>no dot</b>.<br><br>The increment moves past the string end.<br>The next numeric parse raises <b>IndexDefect</b>.<br>The caller only catches ValueError,<br>so the defect escapes and crashes the process.<br><br><u>Verification.</u><br>One: a <b>16-line standalone Nim reproducer</b> triggers the same crash without the fuzzer.<br>Two: the fuzzer and reproducer agree on the exact input.<br>Three: the minimal fix, one if guard, makes the crash go away.<br>Four: the <b>Nim project merged this exact fix</b> as PR twenty-five-seven-ninety-three.<br><br><u>Evidence numbers, if there is time.</u><br>Found after 47 thousand executions.<br>Saved crash bytes: zero HTTP slash.<br>Fixed replay: no crash.<br>Fixed fuzz run: 625 thousand executions clean.">
-    <h1>Confirmed Finding</h1>
+  <div class="slide" data-notes="<u>State the result plainly.</u><br>This slide is about a reproduced crash,<br>not an original first discovery.<br><br>The parser checks that the string starts with HTTP slash.<br>For the input <b>HTTP slash</b>,<br>the index is already at the end after the first numeric parse.<br><br><u>Root cause.</u><br>The original code has an <b>unconditional i dot inc</b>.<br>That line is meant to skip the dot between major and minor version.<br><br>But in this input,<br>there is <b>no dot</b>.<br><br>The increment moves past the string end.<br>The next numeric parse raises <b>IndexDefect</b>.<br>The caller only catches ValueError,<br>so the defect escapes and crashes the process.<br><br><u>What we contributed.</u><br>One: a <b>16-line standalone Nim reproducer</b> triggers the same crash without the fuzzer.<br>Two: the fuzzer and reproducer agree on the exact input.<br>Three: the minimal fix, one if guard, makes the crash go away.<br>Four: upstream PR twenty-five-seven-ninety-three shows this was a real Nim issue,<br>already handled by the maintainers.<br><br><u>Evidence numbers, if there is time.</u><br>The local fuzzer reproduced it after 47 thousand executions.<br>Saved crash bytes: zero HTTP slash.<br>Fixed replay: no crash.<br>Fixed fuzz run: 625 thousand executions clean.">
+    <h1>Reproduced Runtime Crash</h1>
     <div class="twocol">
       <div>
         <div class="hl-box red">
-          <strong>Vulnerability:</strong> <code>parseProtocol("HTTP/")</code> crashes
+          <strong>Reproduced crash:</strong> <code>parseProtocol("HTTP/")</code> raises <code>IndexDefect</code>
         </div>
         <p style="margin-top:.6em;"><strong>Minimal payload:</strong></p>
         <pre>HTTP/</pre>
@@ -356,7 +356,7 @@ i.inc protocol.parseSaturatedNatural(result.major, i)
 i.inc             # ← unconditional. Crashes on "HTTP/"
 i.inc protocol.parseSaturatedNatural(result.minor, i)</pre>
         <div class="hl-box green" style="margin-top:.4rem;">
-          <strong>Fix merged upstream:</strong> <code>if i &lt; protocol.len: inc i</code> (PR #25793)
+          <strong>Upstream fix:</strong> <code>if i &lt; protocol.len: inc i</code> (PR #25793)
         </div>
 
       </div>
@@ -388,7 +388,7 @@ i.inc protocol.parseSaturatedNatural(result.minor, i)</pre>
         <!-- fuzzer_crash_log.svg -->
         <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 720" style="width:100%;height:auto;">
           <rect width="1280" height="720" fill="#111827"/>
-          <text x="70" y="86" font-family="Inter, Arial, sans-serif" font-size="42" font-weight="700" fill="#f9fafb">The fuzzer produced replayable evidence</text>
+          <text x="70" y="86" font-family="Inter, Arial, sans-serif" font-size="42" font-weight="700" fill="#f9fafb">The fuzzer reproduced replayable evidence</text>
           <text x="72" y="126" font-family="Inter, Arial, sans-serif" font-size="22" fill="#cbd5e1">The important result is not a score. It is the exact saved input.</text>
           <rect x="86" y="174" width="1108" height="430" rx="14" fill="#0b1020" stroke="#334155" stroke-width="3"/>
           <g font-family="JetBrains Mono, Consolas, monospace" font-size="27">
@@ -407,7 +407,7 @@ i.inc protocol.parseSaturatedNatural(result.minor, i)</pre>
   </div>
 
   <!-- ===================== SLIDE 5 ===================== -->
-  <div class="slide" data-notes="<u>Transition to AI.</u><br>The AI models were useful,<br>but not as direct proof.<br><br>I used <b>one structured prompt</b>.<br>It asked for location, trigger input, root cause, and exploitability.<br><br><u>The step people skip is validation.</u><br>Every AI finding was manually checked against source code and fuzzing evidence.<br><br>Here is the striking result.<br>DeepSeek and GLM both noticed the HTTP slash area.<br>But both concluded the <b>opposite of reality</b>.<br>They said it would be accepted as version zero dot zero.<br><br>Kimi missed the confirmed crash entirely.<br><br>All three still found useful broader risks:<br>missing timeouts,<br>unbounded chunked body growth,<br>and resource exhaustion my parser harness does not fully model.<br><br><u>Takeaway.</u><br><b>AI confidence has nothing to do with correctness.</b><br>Every claim needs independent verification.">
+  <div class="slide" data-notes="<u>Transition to AI.</u><br>The AI models were useful,<br>but not as direct proof.<br><br>I used <b>one structured prompt</b>.<br>It asked for location, trigger input, root cause, and exploitability.<br><br><u>The step people skip is validation.</u><br>Every AI claim was manually checked against source code and runtime evidence.<br><br>Here is the striking result.<br>DeepSeek and GLM both noticed the HTTP slash area.<br>But both concluded the <b>opposite of reality</b>.<br>They said it would be accepted as version zero dot zero.<br><br>Kimi missed this reproduced crash entirely.<br><br>All three still found useful broader risks:<br>missing timeouts,<br>unbounded chunked body growth,<br>and resource exhaustion my parser harness does not fully model.<br><br><u>Takeaway.</u><br><b>AI confidence has nothing to do with correctness.</b><br>Every claim needs independent verification.">
     <h1>AI Review Results</h1>
     <div class="twocol-7030">
       <div>
@@ -431,7 +431,7 @@ i.inc protocol.parseSaturatedNatural(result.minor, i)</pre>
         <!-- Inlined model_results.svg -->
         <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 720" style="width:100%;height:auto;">
           <rect width="1280" height="720" fill="#f7f8fb"/>
-          <text x="70" y="86" font-family="Inter, Arial, sans-serif" font-size="44" font-weight="700" fill="#172033">AI review: useful leads, zero confirmed bugs</text>
+          <text x="70" y="86" font-family="Inter, Arial, sans-serif" font-size="44" font-weight="700" fill="#172033">AI review: useful leads, zero confirmed crashes</text>
           <text x="72" y="126" font-family="Inter, Arial, sans-serif" font-size="22" fill="#546179">Manual validation downgraded model claims to likely findings.</text>
           <g font-family="Inter, Arial, sans-serif">
             <line x1="180" y1="580" x2="1100" y2="580" stroke="#94a1b8" stroke-width="3"/>
@@ -476,19 +476,19 @@ i.inc protocol.parseSaturatedNatural(result.minor, i)</pre>
   </div>
 
   <!-- ===================== SLIDE 6 ===================== -->
-  <div class="slide" data-notes="<u>Answer the comparison.</u><br>For this project,<br><b>fuzzing was better at proving a bug</b>.<br><br>It produced an exact input,<br>and a replayable result.<br><br>The AI models were still valuable.<br>They pointed to broader resource-exhaustion issues,<br>especially slow clients and chunked body growth.<br><br>But the AI outputs were <b>not enough on their own</b>.<br><br><u>Connect back to Mozilla.</u><br>This supports the broader idea of a <b>validated pipeline</b>.<br>It does not support trusting model output directly.<br><br><u>Core distinction.</u><br>A fuzzer gives runtime evidence:<br>this input crashes the program.<br><br>An AI gives static reasoning:<br>this code looks suspicious.<br><br>Both are tools.<br>Only one provides <b>direct proof</b>.">
+  <div class="slide" data-notes="<u>Answer the comparison.</u><br>For this project,<br><b>fuzzing was better at producing proof</b>.<br><br>It produced an exact input,<br>and a replayable result.<br><br>The AI models were still valuable.<br>They pointed to broader resource-exhaustion issues,<br>especially slow clients and chunked body growth.<br><br>But the AI outputs were <b>not enough on their own</b>.<br><br><u>Connect back to Mozilla.</u><br>This supports the broader idea of a <b>validated pipeline</b>.<br>It does not support trusting model output directly.<br><br><u>Core distinction.</u><br>A fuzzer gives runtime evidence:<br>this input crashes the program.<br><br>An AI gives static reasoning:<br>this code looks suspicious.<br><br>Both are tools.<br>Only runtime evidence provides <b>direct proof</b>.">
     <h1>Which Was Better?</h1>
     <div class="twocol">
       <div>
         <table>
           <tr><th>Criterion</th><th>Fuzzing</th><th>AI Review</th></tr>
-          <tr><td>Confirmed bugs</td><td><strong>1</strong></td><td>0</td></tr>
+          <tr><td>Confirmed local crashes</td><td><strong>1</strong></td><td>0</td></tr>
           <tr><td>Evidence</td><td>Crash input + replay</td><td>Reasoning to validate</td></tr>
           <tr><td>Strength</td><td>Proves runtime behavior</td><td>Covers broader design risks</td></tr>
           <tr><td>Weakness</td><td>Limited by harness</td><td>Can hallucinate or overstate</td></tr>
         </table>
         <div class="hl-box amber" style="margin-top:.8rem;">
-          <strong>Conclusion:</strong> Fuzzing was better for confirmed evidence. AI was better for generating an audit checklist.
+          <strong>Conclusion:</strong> Fuzzing was better for runtime evidence. AI was better for generating an audit checklist.
         </div>
         <p style="margin-top:.6em;"><strong>Best workflow:</strong> AI hypotheses + fuzzing/reproducers.</p>
 
@@ -529,14 +529,14 @@ i.inc protocol.parseSaturatedNatural(result.minor, i)</pre>
   </div>
 
   <!-- ===================== SLIDE 7 ===================== -->
-  <div class="slide" data-notes="<u>Final conclusion.</u><br>The tools are <b>complementary</b>.<br><br>The fuzzer was the best bug prover.<br>The models were useful reviewers,<br>but their findings only mattered after validation.<br><br>The upstream Nim project merged the exact fix we identified.<br>That makes the methodology feel <b>sound</b>.<br>We found a real bug using techniques any student can learn.<br><br><u>Main lesson.</u><br>A finding is not confirmed because a tool reported it.<br>It is not confirmed because a model sounded confident.<br><br>A finding is confirmed when <b>you can reproduce it</b>.<br><br><u>Close with the pipeline.</u><br>The useful unit is not, AI found a bug.<br>It is not, the fuzzer crashed.<br><br>The useful unit is a <b>reproducible pipeline</b>:<br>suspicious idea,<br>tested input,<br>verified fix.">
+  <div class="slide" data-notes="<u>Final conclusion.</u><br>The tools are <b>complementary</b>.<br><br>The fuzzer was the best proof generator.<br>The models were useful reviewers,<br>but their findings only mattered after validation.<br><br>The upstream Nim PR matters because it confirms the issue was real.<br>But this presentation should be honest:<br>we did <b>not</b> discover it first.<br><br>Our contribution was building the local pipeline:<br>fuzzing harness,<br>saved crash input,<br>standalone reproducer,<br>and fixed replay.<br><br><u>Main lesson.</u><br>A finding is not confirmed because a tool reported it.<br>It is not confirmed because a model sounded confident.<br><br>A finding is confirmed when <b>you can reproduce it</b>.<br><br><u>Close with the pipeline.</u><br>The useful unit is not, AI found a bug.<br>It is not, the fuzzer crashed.<br><br>The useful unit is a <b>reproducible pipeline</b>:<br>suspicious idea,<br>tested input,<br>verified fix.">
     <h1>Final Takeaway</h1>
     <div class="twocol">
       <div>
         <ul>
-          <li>Found <strong>one confirmed denial-of-service bug</strong> — now <strong>fixed upstream</strong> (PR #25793).</li>
+          <li>Reproduced <strong>one denial-of-service crash</strong>, already <strong>fixed upstream</strong> (PR #25793).</li>
           <li><strong>Fuzzing</strong> gave the strongest evidence: exact input, replayable crash, verified fix.</li>
-          <li><strong>AI review</strong> found useful leads but required correction — zero confirmed bugs from AI alone.</li>
+          <li><strong>AI review</strong> found useful leads but required correction, zero confirmed crashes from AI alone.</li>
         </ul>
         <div class="hl-box green" style="margin-top:1rem;">
           <p style="font-size:1.3rem;font-weight:700;color:#0f172a;">Modern security work is a pipeline:</p>
@@ -545,7 +545,7 @@ i.inc protocol.parseSaturatedNatural(result.minor, i)</pre>
           </p>
         </div>
         <div class="hl-box amber" style="margin-top:.8rem;">
-          <strong>Key lesson for students:</strong> Tools produce leads, not conclusions. A finding is only confirmed when <strong>you can reproduce it</strong>.
+          <strong>Key lesson for students:</strong> Tools produce leads, not conclusions. A claim is only confirmed when <strong>you can reproduce it</strong>.
         </div>
 
       </div>
