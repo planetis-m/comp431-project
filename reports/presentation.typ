@@ -150,7 +150,7 @@
     ]),
   )
   #v(20pt)
-  #label("Evaluation standard: exact input, direct reproducer, fixed-version replay.")
+  #label("Evaluation standard: exact input, standalone replay, upstream fix.")
 ]
 
 // 02
@@ -297,13 +297,13 @@
     columns: (1fr, 1fr, 1fr, 1fr),
     gutter: 14pt,
     step("01", "crash", [fuzzer saves exact input], active: true),
-    step("02", "reduce", [minimal payload is isolated]),
-    step("03", "reproduce", [small Nim program triggers the same defect]),
+    step("02", "reduce", [minimizer shrinks to PUT  HTTP/]),
+    step("03", "reproduce", [standalone replay confirms the same defect]),
     step("04", "replay", [fixed version rejects safely]),
   )
   #v(34pt)
   #terminal(path: "/audit/evidence")[
-    #prompt([artifact: 0HTTP/])
+    #prompt([artifact: minimized 10-byte crash input])
     #v(5pt)
     #prompt([minimal: HTTP/])
     #v(5pt)

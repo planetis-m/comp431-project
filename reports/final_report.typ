@@ -100,12 +100,11 @@ The project follows the "LLM-assisted Security Audit" course topic. It implement
 auditing setup, runs simulated malformed inputs against parser code, records evidence, and evaluates
 the usefulness of each technique. No remote system was tested.
 
-The main result was a confirmed denial-of-service bug in the HTTP protocol parser. A malformed
-request-line protocol token that lacks a minor version (such as `HTTP/` or `HTTP/1`) can raise an
-uncaught `IndexDefect` and crash a process using this parser. This vulnerability has since been fixed
-upstream in the Nim repository (PR #25793), which validates our finding as a real, previously
-existing bug. For this project, we used an older Nim version intentionally — the goal is to study
-vulnerability discovery techniques, not to exploit live systems.
+The main result was a confirmed denial-of-service crash in the HTTP protocol parser. A malformed
+request-line protocol token, `HTTP/`, can raise an uncaught `IndexDefect` in the older version tested
+for this project. The Nim project has since fixed this upstream in PR #25793, which validates the
+finding as a real previously existing bug. The older Nim version was used intentionally to study
+discovery and validation techniques.
 
 = Target and Background
 
@@ -116,9 +115,9 @@ Nim/lib/pure/asynchttpserver.nim
 ```
 
 This module implements an asynchronous HTTP server. It is not intended to be a production web server
-directly exposed to the Internet, but applications may still use it locally or behind another service.
-Since HTTP request data is attacker-controlled, request parsing is still a meaningful security
-boundary.
+directly exposed to the Internet, but applications may use it locally or behind another service. HTTP
+request data is attacker-controlled in the general model, so request parsing remains a meaningful
+security boundary for defensive testing.
 
 The most important parsing path is `processRequest`, which reads:
 
@@ -128,27 +127,25 @@ The most important parsing path is `processRequest`, which reads:
 - optional chunked body data,
 - connection-management headers.
 
-The most relevant helper for the confirmed crash is `parseProtocol`, which parses strings such as
+The helper most relevant to the confirmed crash is `parseProtocol`, which parses strings such as
 `HTTP/1.1` into a tuple containing the original string, major version, and minor version.
 
 = Threat Model and Risk Analysis
 
-The attacker model is an unauthenticated client who can open a connection to an application using
-`std/asynchttpserver` and send malformed HTTP data. The attacker controls bytes in the request line,
+For the experiment, the attacker model is an unauthenticated client who can send malformed HTTP data
+to an application using the older vulnerable parser. The attacker controls bytes in the request line,
 headers, and body.
-
-The main risks considered were:
 
 #report-table(
   (1.1fr, 2.6fr),
   (
-    table.header[*Risk*][*Why It Matters*],
+    table.header[*Risk category*][*Why it matters in parser testing*],
   ),
   (
-    [Process crash], [One malformed request can terminate the server process, causing denial of service.],
-    [Memory exhaustion], [Large or repeated inputs can force the server to allocate memory.],
+    [Process crash], [One malformed request can terminate a process in the vulnerable version.],
+    [Memory exhaustion], [Large or repeated inputs can force allocation pressure.],
     [Connection exhaustion], [Slow reads without timeouts can hold sockets open.],
-    [HTTP logic errors], [Incorrect handling of headers or bodies can confuse applications using the server.],
+    [HTTP logic errors], [Incorrect header or body handling can confuse applications using the server.],
   ),
 )
 
@@ -172,70 +169,87 @@ The prototype has four parts:
   ),
 )
 
-The fuzz harness does not start a real network server. Instead, it directly invokes the full request
+The fuzz harness does not start a real network server. Instead, it directly calls the full request
 parsing logic that would normally receive data from a client. The harness calls
-`parseFullRequestOriginal`, which exercises all the parsing stages in sequence: method, URI,
-protocol, headers, and body. This makes the test faster and more deterministic, while still
-exercising the code that handles attacker-controlled HTTP strings.
+`parseFullRequestOriginal`, which exercises all parsing stages in sequence: method, URI, protocol,
+headers, and body. This makes testing faster and deterministic while still exercising code that
+handles untrusted HTTP strings.
 
 The harness also supports a *standalone replay mode* (`-d:fuzzStandalone`) that reads crash inputs
-from command-line file arguments and replays them through the same parsing code — without libFuzzer,
-without coverage tracking, without mutation. This is how we verify crash artifacts independently.
+from command-line file arguments and replays them through the same parsing code — no libFuzzer, no
+coverage tracking, no mutation.
 
 = Security Techniques Used
 
 == Coverage-Guided Fuzzing
 
 The first technique is fuzz testing. libFuzzer mutates inputs and uses coverage feedback to explore
-new program paths. The harness was compiled with Clang, libFuzzer, AddressSanitizer, and
-UndefinedBehaviorSanitizer.
+new program paths. The harness was compiled with:
 
-This is an attack simulation because it repeatedly sends malformed local inputs to code that normally
+- Clang,
+- libFuzzer,
+- AddressSanitizer,
+- UndefinedBehaviorSanitizer.
+
+This is a local attack simulation because it repeatedly sends malformed inputs to code that normally
 processes untrusted HTTP data.
 
 == AI-Assisted Static Review
 
-The second technique is LLM-assisted review. A single structured prompt asked the model to inspect
-`asynchttpserver.nim` and report findings with title, vulnerability type, location, triggering
-input, root cause, exploitability, and classification.
+The second technique is LLM-assisted review. A single structured prompt asked models to inspect
+`asynchttpserver.nim` and report findings with:
 
-DeepSeek, GLM-5.1, and Kimi K2.6 produced usable transcripts for this submission.
+- title,
+- vulnerability type,
+- location,
+- triggering input,
+- root cause,
+- exploitability,
+- classification.
 
-The AI output was treated as a set of hypotheses. I checked the source code and the fuzzing evidence
-before classifying each claim.
+DeepSeek V4 Pro, GLM-5.1, and Kimi K2.6 produced usable transcripts. Their output was treated as
+hypotheses. Each claim was checked against source code and fuzzing evidence before classification.
 
 = Experimental Methodology
 
 == Building the Fuzzer
 
-The build command lives in `scripts/build_fuzzers.sh`. The key ideas behind the compilation flags:
+The build command lives in `scripts/build_fuzzers.sh`. The core compilation command is:
 
-- *`--cc:clang`* — libFuzzer requires Clang. GCC does not recognize `-fsanitize=fuzzer`.
-- *`-d:noSignalHandler`* — Disables Nim's signal handlers so that AddressSanitizer (not Nim) detects
-  and reports crashes.
-- *`-d:useMalloc`* — Uses the system allocator so ASan can instrument memory accesses. Nim's own
-  allocator would bypass this instrumentation.
-- *`--noMain:on`* — libFuzzer provides its own `main()`. Without this flag we get a duplicate-symbol
-  linker error.
-- *`--passC/--passL -fsanitize=fuzzer,address,undefined`* — Links the fuzzer engine,
-  AddressSanitizer (buffer overflows, use-after-free), and UndefinedBehaviorSanitizer (integer
-  overflow, null dereference).
-- *`-g`* — Debug symbols for readable stack traces.
+```bash
+nim c \
+  --cc:clang \
+  -d:noSignalHandler \
+  -d:useMalloc \
+  --noMain:on \
+  --passC:-fsanitize=fuzzer,address,undefined \
+  --passC:-g \
+  --passL:-fsanitize=fuzzer,address,undefined \
+  --passL:-g \
+  experiments/fuzzing/harness/asynchttpserver_fuzzer.nim
+```
 
-The build produces an executable at `experiments/fuzzing/harness/asynchttpserver_fuzzer`.
+The important flags:
+
+- `--cc:clang`: libFuzzer requires Clang.
+- `-d:noSignalHandler`: lets sanitizers report crashes directly, not Nim's own handlers.
+- `-d:useMalloc`: routes allocation through the system allocator so ASan can instrument it.
+- `--noMain:on`: lets libFuzzer provide `main()`.
+- `--passC/--passL -fsanitize=fuzzer,address,undefined`: enables libFuzzer, ASan, and UBSan.
+
+The build produces `experiments/fuzzing/harness/asynchttpserver_fuzzer`.
 
 == Seed Corpus
 
-libFuzzer starts from small, valid inputs and mutates them to discover crashes. We prepared three
-seed files in `experiments/fuzzing/corpus/` — plain HTTP requests fed directly to the full request
-parser:
+The seed corpus is a set of small valid inputs that exercise target paths before mutation. The
+project uses three seed files:
 
-- *`seed_get_http11`* — A minimal GET request exercising the request-line, protocol parser, and
-  header detection.
-- *`seed_post_content_length`* — A POST with `Content-Length`, exercising body reading and header
-  parsing.
-- *`seed_post_chunked`* — A POST with chunked transfer encoding, exercising the chunked body parsing
-  path.
+- `seed_get_http11`: a minimal valid GET request.
+- `seed_post_content_length`: a POST request with `Content-Length`.
+- `seed_post_chunked`: a POST request with chunked transfer encoding.
+
+The seeds are intentionally well-formed. The fuzzer mutates them into malformed inputs and observes
+whether new paths or crashes appear.
 
 == Running the Fuzzer
 
@@ -251,17 +265,15 @@ ASAN_OPTIONS=detect_leaks=0 \
   "$WORKDIR/corpus"
 ```
 
-Key points:
+The important pieces:
 
-- *`ASAN_OPTIONS=detect_leaks=0`* — The fuzzer intentionally never frees memory. Leak reports would
-  be false positives.
-- *`-max_total_time=60`* — 60 seconds is enough for this educational experiment. Real campaigns run
-  for hours or days.
-- *`-artifact_prefix`* — Where to save crash inputs.
+- `ASAN_OPTIONS=detect_leaks=0`: disables leak detection to avoid noise in a fuzz target.
+- `-max_total_time=60`: bounds the run to 60 seconds.
+- `-artifact_prefix`: where to save crash inputs.
 
 == Interpreting Fuzzer Output
 
-A typical run that found the crash produced output like this:
+A typical run that found the crash produced:
 
 ```text
 #2373  REDUCE cov: 3798 ft: 8650 corp: 106/4434b lim: 67 exec/s: 0 rss: 58Mb
@@ -272,37 +284,29 @@ Base64: R0VUIC0gSFRUUC8gSFRUUC8xLjEgSA==
 stat::number_of_executed_units: 2847
 ```
 
-What matters here:
+Key fields:
 
-- *`REDUCE`* — libFuzzer is *minimizing* the crash: trying to shrink the input to the smallest
-  version that still crashes. This is one of libFuzzer's most useful features — it turns a
-  potentially large mutated blob into something a human can reason about.
-- *`cov: 3798`* — 3,798 unique code edges reached. Higher means more of the target code explored.
-- *`SUMMARY: libFuzzer: fuzz target exited`* — The harness terminated unexpectedly (called `quit(70)`
-  on a `Defect`). A normal run says `DONE`.
-- *`Base64: R0VUIC0gSFRUUC8gSFRUUC8xLjEgSA==`* — Decodes to `GET - HTTP/ HTTP/1.1 H`, a request
-  whose protocol field is `HTTP/` (no version digits).
+- `#2373`: the fuzzer had executed 2,373 test cases.
+- `REDUCE`: libFuzzer was minimizing the crashing input.
+- `cov: 3798`: 3,798 unique code edges were reached.
+- `SUMMARY: libFuzzer: fuzz target exited`: the target terminated unexpectedly.
+- `Base64: R0VUIC0gSFRUUC8gSFRUUC8xLjEgSA==`: decodes to `GET - HTTP/ HTTP/1.1 H`, a request
+  whose protocol field is `HTTP/`.
 
 == Crash Artifact
 
-The saved crash file at `experiments/fuzzing/results/F-001_crash_input` is a 34-byte mutated HTTP
-request. Its request line, when split by spaces, has `HTTP/1` as the protocol field — a string with
-a major version but no dot-separator or minor version.
-
-The `parseProtocolOriginal` function accepts the `HTTP/` prefix, parses the major version `1`, then
-unconditionally increments `i` to skip the dot separator. Since there is no dot, `i` moves past the
-end of the string, and the subsequent call to `parseSaturatedNatural` for the minor version triggers
-`IndexDefect`.
-
-The root cause is identical to the simpler case of `HTTP/` (no version digits at all): the
-unconditional `i.inc` that skips the dot separator.
+The saved crash file `experiments/fuzzing/results/F-001_crash_input` is the minimized
+10-byte input `PUT  HTTP/`. When split by spaces, the third field is `HTTP/` — a
+protocol string with no version digits at all. The `parseProtocolOriginal` function
+accepts the `HTTP/` prefix, then unconditionally increments `i` to skip the dot
+separator. Since the string is only 5 characters, `i` moves past the end, and the
+subsequent call to `parseSaturatedNatural` triggers `IndexDefect`.
 
 == Verifying with Standalone Replay
 
-A crash artifact from a fuzzer is evidence, but we should verify it independently. The harness
-supports standalone replay mode. Building with `-d:fuzzStandalone` produces a binary that reads file
-paths from its arguments and feeds each file's contents to `LLVMFuzzerTestOneInput` directly — no
-libFuzzer, no coverage tracking, no mutation:
+A fuzzer artifact is evidence, but it should be verified independently. The harness supports a
+standalone replay mode that feeds saved inputs through the same parsing code without the fuzzer
+engine:
 
 ```bash
 nim c -d:fuzzStandalone --panics:on --mm:arc \
@@ -319,44 +323,41 @@ StandaloneFuzzTarget: running 1 inputs
 Error: unhandled exception: index out of bounds: 7..5 notin 0..5 [IndexDefect]
 ```
 
-The stack trace shows the exact call chain: harness → `parseFullRequestOriginal` →
-`parseProtocolOriginal` → `parseSaturatedNatural` → crash. For comparison, replaying the well-formed
-seed corpus produces exit code 0 with no crash.
+The stack trace confirms the call chain: `parseFullRequestOriginal` → `parseProtocolOriginal` →
+`parseSaturatedNatural` → crash. For comparison, replaying the well-formed seed corpus produces
+exit code 0.
 
 == AI Review Workflow
 
-The AI workflow was separate from the fuzzing:
+The AI workflow was separate from fuzzing:
 
-+ A structured prompt in `ai_findings/VULN_DISCOVERY_PROMPT.txt` with the target file, an output
-  format requiring title/type/location/input/cause/exploitability/classification, 13 attack surfaces
-  to examine, and rules to be evidence-based.
-+ The same prompt submitted to DeepSeek V4 Pro, GLM-5.1, and Kimi K2.6 through their chat
-  interfaces.
-+ Raw outputs saved in `ai_findings/<model>/output.txt`.
-+ Findings extracted into `ai_findings/<model>/findings_extracted.md`.
-+ Each finding validated against source code and fuzzing evidence.
++ A structured prompt in `ai_findings/VULN_DISCOVERY_PROMPT.txt` described the target, required output fields, and attack surfaces.
++ The same prompt and source were submitted to DeepSeek V4 Pro, GLM-5.1, and Kimi K2.6.
++ Raw outputs were saved in `ai_findings/<model>/output.txt`.
++ Findings were extracted into `ai_findings/<model>/findings_extracted.md`.
++ Each finding was validated against source code and fuzzing evidence.
+
+The critical rule was that AI output was treated as a list of hypotheses, not confirmed facts.
 
 == Distinguishing Bugs from False Positives
 
-This is one of the most important skills in vulnerability research. The checklist we used:
+The validation checklist was:
 
-+ *Can we replay the crash independently?* The standalone replay is the strongest form of evidence.
-  The saved artifact crashes the same parsing code without the fuzzer engine.
-+ *Can we trace the code path from input to failure?* If the static trace is valid but we cannot
-  produce a dynamic reproducer, we classify as _likely_.
-+ *Is the AI misreading runtime behavior?* AI models analyze code statically. When a model's
-  predicted behavior contradicts actual runtime evidence, the finding is a _false positive_
-  regardless of confidence.
-+ *Is the claim bounded by existing limits?* Some findings are technically true but practically
-  harmless. For example, `split(' ')` allocations are bounded by `maxLine` (8,192 bytes).
-+ *Does the fuzzer agree?* If the fuzzer reaches the same code but does not crash, and the AI claims
-  a crash is possible, the AI is likely wrong.
++ Can we replay the crash independently?
++ Can we trace the code path from input to failure?
++ Is the AI misreading runtime behavior?
++ Is the claim bounded by existing limits?
++ Does the fuzzer agree?
+
+The `HTTP/` finding passed the strongest test: standalone replay triggers the same failure as the
+fuzzer artifact. DeepSeek and GLM noticed the suspicious `HTTP/` case, but they incorrectly
+predicted it would be accepted as version `0.0`. Runtime evidence showed the opposite.
 
 = Confirmed Vulnerability
 
 == F-001: `parseProtocol` IndexDefect
 
-Relevant source (from the vulnerable version we tested):
+Relevant source from the vulnerable version:
 
 ```nim
 proc parseProtocol(protocol: string): tuple[orig: string, major, minor: int] =
@@ -373,52 +374,34 @@ proc parseProtocol(protocol: string): tuple[orig: string, major, minor: int] =
 Expected behavior:
 
 - `HTTP/1.1` should parse successfully.
-- Incomplete version values such as `HTTP/` should not crash the process. Raising `ValueError`
-  (which the caller catches) would be acceptable, but escaping the caller's error handling is not.
+- Incomplete version values such as `HTTP/` should not crash the process.
+- A handled `ValueError` would be acceptable for malformed input.
 
-Actual behavior (for `HTTP/`):
+Actual behavior:
 
-- The prefix check passes (`i == 5`), but the string is only 5 characters.
-- `parseSaturatedNatural` reads zero digits at position 5, leaving `i` at `5`.
-- The unconditional `i.inc` (skip the dot) moves `i` to `6` — past the end.
-- The second `parseSaturatedNatural` starts at position `6`, which is out of bounds. Nim raises
-  `IndexDefect`.
-- `processRequest` catches only `ValueError`. The `IndexDefect` escapes and crashes the process.
+- `HTTP/` passes the prefix check.
+- `i` becomes `5`.
+- The string length is also `5`.
+- `parseSaturatedNatural` consumes zero digits and leaves `i` at `5`.
+- The old code executes `i.inc` unconditionally.
+- `i` becomes `6`, past the end of the string.
+- The second numeric parse starts out of bounds.
+- Nim raises `IndexDefect`.
+- `processRequest` catches only `ValueError`, so the `IndexDefect` escapes.
 
-The same crash occurs for `HTTP/1` (the fuzzer's saved artifact): after parsing major version `1`,
-`i` is at position 6 (end of the 6-character string), and the unconditional increment pushes it to
-7 — out of bounds.
+== Why It Is Real
 
-== Why This Is a Real Bug
-
-+ *Standalone replay confirms the crash.* The saved artifact crashes the harness with a full stack
-  trace pointing to `parseProtocolOriginal`.
-+ *The root cause is clear and fixable.* One unconditional `i.inc` that should be guarded by
-  `if i < protocol.len`.
-+ *The upstream maintainers agreed and merged a fix.* Nim PR #25793 changes `i.inc # Skip .` to
-  `if i < protocol.len: inc i # Skip .` — exactly the minimal fix.
-+ *The error message is precise.* `index out of bounds: 7..5 notin 0..5` (for `HTTP/1`) or
-  `6..4 notin 0..4` (for `HTTP/`) tells us exactly what went wrong.
++ Standalone replay confirms the crash with a full stack trace.
++ The root cause is one clear unconditional `i.inc`.
++ The fuzzer and replay agree on the same defect.
++ The upstream Nim project merged PR #25793 with the same guard.
++ The error message precisely identifies the failure: `index out of bounds: 6..4 notin 0..4`.
 
 = Fuzzing Results
 
-The fuzzing campaign found the crash. A representative run:
-
-```text
-#2373  REDUCE cov: 3798 ft: 8650 corp: 106/4434b lim: 67 exec/s: 0 rss: 58Mb
-==67332== ERROR: libFuzzer: fuzz target exited
-SUMMARY: libFuzzer: fuzz target exited
-Base64: R0VUIC0gSFRUUC8gSFRUUC8xLjEgSA==
-stat::number_of_executed_units: 2847
-```
-
-The crash was triggered after approximately 2,847 executions. The Base64-decoded crash input is
-`GET - HTTP/ HTTP/1.1 H`, a request with protocol field `HTTP/` (missing version digits). The saved
-artifact `F-001_crash_input` is a 34-byte variant triggering the same defect through protocol field
-`HTTP/1`.
-
-Summary:
-
+The fuzzing campaign found the crash after approximately 2,847 executions with 3,798 code
+edges covered. The original crash artifact was 34 bytes; libFuzzer's `-minimize_crash=1` reduced
+it to the 10-byte input `PUT  HTTP/` — a request line whose protocol field is exactly `HTTP/`.
 #report-table(
   (1.15fr, 1.5fr, 1.15fr, 0.9fr, 0.8fr),
   (
@@ -431,16 +414,15 @@ Summary:
 
 == Replay
 
-`scripts/replay_crash.sh` replays the saved crash artifact against the fuzzer binary in single-run
-mode (`-runs=1`). This verifies the crash is reproducible and not a fluke. The standalone replay
-mode (above) serves the same purpose without the fuzzer engine.
+The replay command in `scripts/replay_crash.sh` passes the saved artifact back to the fuzzer in
+single-run mode (`-runs=1`) for verification. The standalone replay mode (above) serves the same
+purpose without the fuzzer engine.
 
 = AI-Assisted Review Results
 
-Three models produced usable transcripts: DeepSeek V4 Pro, GLM-5.1, and Kimi K2.6. DeepSeek
-reported eight findings, checked against source code and fuzzing results.
+Three models produced usable transcripts: DeepSeek V4 Pro, GLM-5.1, and Kimi K2.6.
 
-DeepSeek validation summary:
+== DeepSeek V4 Pro
 
 #report-table(
   (1.4fr, 0.6fr),
@@ -455,29 +437,12 @@ DeepSeek validation summary:
   ),
 )
 
-#report-table(
-  (1.4fr, 1.1fr, 1.1fr, 1.6fr),
-  (
-    table.header[*AI Finding*][*Model Claim*][*Classification*][*Reason*],
-  ),
-  (
-    [Chunked body has no `maxBody` check], [Confirmed DoS], [Likely], [Static trace valid, no memory-exhaustion reproducer.],
-    [No receive timeouts], [Confirmed DoS], [Likely], [No timeout on `recvLineInto`, but no live slow-client test.],
-    [Header limit checked after storing], [Likely DoS], [Likely], [Stores header before checking `headerLimit`; bounded but real.],
-    [`Connection` header first-value logic], [Likely logic issue], [Likely], [`HttpHeaderValues` returns first value only.],
-    [Chunked body only handled for POST], [Likely logic issue], [Likely], [`hasChunkedEncoding` returns true only for `HttpPost`.],
-    [Case-sensitive `chunked` check], [Likely logic issue], [Likely], [Transfer coding comparison is exact string matching.],
-    [`split(' ')` allocation amplification], [Speculative DoS], [Unlikely], [Bounded by `maxLine`.],
-    [`HTTP/` accepted as version `0.0`], [Speculative logic issue], [False positive], [Fuzzing and replay show it crashes instead.],
-  ),
-)
+DeepSeek's useful likely findings included chunked body growth without `maxBody`, missing receive
+timeouts, header-limit behavior, connection-header first-value logic, POST-only chunked handling, and
+case-sensitive `chunked` comparison. Its important false positive was the claim that `HTTP/` would be
+accepted as version `0.0`.
 
-The most important AI error was about the same area as the fuzzing crash. DeepSeek claimed that
-`HTTP/` would be accepted as version `0.0`. The actual program crashes with `IndexDefect`.
-
-GLM-5.1 reported ten candidate findings (including two self-withdrawn).
-
-GLM validation summary:
+== GLM-5.1
 
 #report-table(
   (1.4fr, 0.6fr),
@@ -492,22 +457,21 @@ GLM validation summary:
   ),
 )
 
-GLM made the same mistake as DeepSeek around `HTTP/`, concluding no crash occurs and that the parser
-accepts version `0.0`.
+GLM overlapped with DeepSeek on chunked body growth and missing receive timeouts. Like DeepSeek, it
+reached the wrong runtime conclusion about `HTTP/`, so it is not counted as finding the confirmed
+crash.
 
-Kimi K2.6 produced five candidate findings, all marked confirmed by the model, downgraded to likely
-since no dynamic reproducers were built. Its useful findings overlapped with the other models on
-chunked body growth and missing receive timeouts.
+== Kimi K2.6
 
-Kimi did not report the confirmed fuzzing crash. None of the three models correctly identified the
-bug that the fuzzer confirmed.
+Kimi produced five candidate findings, all downgraded to likely because no dynamic reproducers were
+built. It did not report the confirmed `HTTP/` fuzzing crash.
 
-Overall AI validation summary:
+== Overall AI Summary
 
 #report-table(
   (1.35fr, 0.9fr, 0.9fr, 0.9fr, 0.9fr, 1.1fr),
   (
-    table.header[*Model*][*Usable transcript*][*Candidates*][*Confirmed*][*Likely*][*False / withdrawn*],
+    table.header[*Model*][*Usable transcript*][*Reported*][*Confirmed*][*Likely*][*False / withdrawn*],
   ),
   (
     [DeepSeek V4 Pro], [Yes], [8], [0], [6], [1],
@@ -516,20 +480,22 @@ Overall AI validation summary:
   ),
 )
 
+The AI outputs were useful for review coverage, but none of the usable transcripts correctly
+identified the bug that fuzzing confirmed.
+
 = Evaluation
 
 Fuzzing was better at producing confirmed evidence. It gave a minimized input, a crash log, and a
 way to replay the result.
 
-AI review was useful in a different role. It found broader design concerns that a parser fuzzer does
-not model: timeout behavior, long-running chunked body growth, header storage before limit checks.
-However, the AI outputs needed manual checking because none correctly identified the confirmed crash,
-and two made the wrong claim that `HTTP/` would be accepted as version `0.0`.
+AI review was useful in a different role. It found broader design concerns that a small parser fuzzer
+does not fully model — timeout behavior, chunked body growth, header storage before limit checks.
+The AI outputs still required manual checking because none correctly identified the confirmed crash.
 
 #report-table(
   (1.15fr, 1.45fr, 1.7fr),
   (
-    table.header[*Criterion*][*Fuzzing*][*AI-Assisted Review*],
+    table.header[*Criterion*][*Fuzzing*][*AI-assisted review*],
   ),
   (
     [Confirmed bugs], [1], [0],
@@ -539,71 +505,80 @@ and two made the wrong claim that `HTTP/` would be accepted as version `0.0`.
   ),
 )
 
-AI review output should be used like a review checklist. Each item needs either a reproducer, a
-complete static trace, or a clear reason why it is not exploitable.
+AI output should be used as a review checklist. Each item needs either a reproducer, a complete
+static trace, or a clear reason why it is not exploitable.
 
 = Remediation Discussion
 
-The crash is caused by one unconditional index increment. The minimal fix is to skip the dot only
-when there is still a character to skip:
+The fix does not need many new error branches. The crash is caused by one unconditional index
+increment. The minimal fix is:
 
 ```nim
+result = default(tuple[orig: string, major, minor: int])
+var i = protocol.skipIgnoreCase("HTTP/")
+if i != 5:
+  raise newException(ValueError, "Invalid request protocol. Got: " & protocol)
+
+result.orig = protocol
 i.inc protocol.parseSaturatedNatural(result.major, i)
 if i < protocol.len:
   inc i # Skip .
 i.inc protocol.parseSaturatedNatural(result.minor, i)
 ```
 
-This keeps the existing behavior for non-HTTP prefixes (they raise the handled `ValueError`). It
-only prevents the parser from manufacturing an out-of-bounds index when the version is incomplete.
+This only prevents the parser from manufacturing an out-of-bounds index when the version is
+incomplete.
 
 == Upstream Fix Confirmation
 
 The Nim project merged this exact fix in #link("https://github.com/nim-lang/Nim/pull/25793")[PR #25793].
+The upstream change is:
 
-- *Old*: `i.inc # Skip .`
-- *New*: `if i < protocol.len: inc i # Skip .`
+- Old: `i.inc # Skip .`
+- New: `if i < protocol.len: inc i # Skip .`
 
-The fact that upstream merged a fix identical to what we identified independently validates both the
-finding and our root-cause analysis.
+The upstream fix validates the finding and the root-cause analysis.
 
 = Limitations
 
-The fuzzer does not run a complete server. It tests parser paths but does not model real socket
-timing, slow clients, simultaneous connections, callback behavior, or OS file-descriptor limits.
+The fuzzer does not run a complete server. It tests parser paths but does not model:
 
-The three AI model outputs were validated manually. The report compares fuzzing against a small
-sample of AI-assisted review runs.
+- real socket timing,
+- slow clients,
+- many simultaneous connections,
+- callback behavior,
+- operating-system file-descriptor limits.
 
-The confirmed impact is denial of service. No evidence of memory corruption or remote code execution
-was found.
+The three AI model outputs were validated manually. The confirmed impact was denial of service. No
+evidence of memory corruption or remote code execution was found.
 
 = Lessons Learned
 
 *Reproducible evidence matters.* A crash claim is strongest when it includes the exact input, the
-fuzzer log, and an independent replay that produces the same crash through the same code path.
+fuzzer log, and an independent replay.
 
 *Distinguish tools from evidence.* A fuzzer produces direct runtime evidence. An AI model produces
-static hypotheses. Both are useful, but they serve different roles. A finding is not "confirmed"
-because a model sounds confident — it is confirmed because you can reproduce it.
+static hypotheses. A finding is not confirmed because a model sounds confident — it is confirmed
+because it can be reproduced.
 
-*Minimization is valuable.* libFuzzer's automatic crash minimization reduced the input to something
-a human can reason about. The protocol field `HTTP/1` is clearly missing the dot-separator and minor
-version, pointing directly to the unconditional `i.inc`.
+*Minimization is valuable.* libFuzzer reduced the crash input to something a human can reason about.
+The protocol field `HTTP/` is clearly missing its version digits, pointing directly to the
+unconditional `i.inc`.
 
-*LLMs can point toward interesting code but misread runtime behavior.* In this project, DeepSeek and
-GLM noticed the suspicious `HTTP/` case but reached the opposite conclusion from the actual program,
-while Kimi missed the crash entirely.
+An LLM can help organize an audit and point toward interesting code paths, but it can be wrong about
+runtime behavior. DeepSeek and GLM noticed the suspicious `HTTP/` case but reached the opposite
+conclusion from the actual program, while Kimi missed that crash entirely.
 
 = Conclusion
 
-The project implemented a working local security-audit prototype and used it to find a real crash in
-Nim's `std/asynchttpserver`. Fuzzing produced the strongest confirmed result: an uncaught
-`IndexDefect` from `parseProtocol`. The upstream Nim project has since merged a fix for this exact
-issue (PR #25793), confirming that our methodology found a genuine, previously existing bug.
+The project implemented a working local security-audit prototype and used it to reproduce a real,
+already-fixed crash in Nim's `std/asynchttpserver`. Fuzzing produced the strongest confirmed result:
+an uncaught `IndexDefect` from `parseProtocol("HTTP/")` in the older version tested. The upstream Nim
+project has since merged a fix for this exact issue in PR #25793.
 
 AI-assisted review produced useful likely findings but no confirmed finding. All usable model outputs
-required validation, and all over-claimed at least some findings as confirmed. The best workflow is
-to use AI for broad review and hypothesis generation, then use fuzzing and replay to validate the
-claims. The useful unit is not "AI found a bug" — it is a reproducible pipeline that turns a
+required validation, and all over-claimed at least some findings as confirmed. The best workflow was
+to use AI for broad review and hypothesis generation, then use fuzzing and replay to validate claims.
+
+The useful unit is not "AI found a bug." The useful unit is a reproducible pipeline that turns a
 suspicious idea into a tested input and a verified fix.

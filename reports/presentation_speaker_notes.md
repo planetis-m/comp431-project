@@ -57,8 +57,8 @@ Do not oversell either side.
 
 The important evaluation rule is at the bottom:
 exact input.
-direct reproducer.
-fixed-version replay.
+standalone replay.
+upstream fix.
 
 Emphasis moment:
 Evidence has to survive **replay**.
@@ -171,7 +171,11 @@ AddressSanitizer.
 UndefinedBehaviorSanitizer.
 
 Report detail:
-The fuzzer reached the crash after 47,319 executions.
+The fuzzer reached the crash after approximately 2,800 executions.
+
+The original artifact was 34 bytes.
+
+The minimizer reduced it to 10 bytes: `PUT  HTTP/`.
 
 Transition:
 The reduced input is the key moment.
@@ -266,15 +270,17 @@ Step 01:
 Fuzzer saves exact input.
 
 Step 02:
-The input is reduced.
+The input is minimized.
 
-From `0HTTP/` to the actual parser payload: `HTTP/`.
+From 34 bytes down to `PUT  HTTP/`.
+
+The protocol field is `HTTP/`.
 
 Step 03:
-A standalone Nim reproducer triggers the same defect.
+Standalone replay confirms the same defect.
 
 Step 04:
-Replay against the fixed harness no longer crashes.
+Upstream PR 25793 applies the same guard we identified.
 
 Terminal anchor:
 artifact.
