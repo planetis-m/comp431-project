@@ -149,5 +149,12 @@ proc LLVMFuzzerTestOneInput(data: ptr UncheckedArray[byte], len: csize_t): cint 
   except CatchableError:
     discard
 
-proc initialize(): cint {.exportc: "LLVMFuzzerInitialize".} =
-  {.emit: "N_CDECL(void, NimMain)(void); NimMain();".}
+when defined(fuzzStandalone):
+  import std/[cmdline, syncio]
+  stderr.write "StandaloneFuzzTarget: running " & $paramCount() & " inputs\n"
+  for i in 1..paramCount():
+    var buf = readFile(paramStr(i))
+    discard LLVMFuzzerTestOneInput(cast[ptr UncheckedArray[byte]](cstring(buf)), buf.len.csize_t)
+else:
+  proc initialize(): cint {.exportc: "LLVMFuzzerInitialize".} =
+    {.emit: "N_CDECL(void, NimMain)(void); NimMain();".}
