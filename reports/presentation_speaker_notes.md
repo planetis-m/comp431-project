@@ -375,7 +375,7 @@ Move to weakness row.
 
 Fuzzing depends on harness scope.
 
-AI can misread runtime behavior.
+AI can hallucinate or overstate.
 
 Report detail:
 DeepSeek and GLM noticed the `HTTP/` area but predicted the wrong outcome.

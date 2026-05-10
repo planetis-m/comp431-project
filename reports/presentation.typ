@@ -349,8 +349,8 @@
     table.header([#label("CRITERION", fill: phosphor2)], [#label("FUZZING", fill: phosphor2)], [#label("AI REVIEW", fill: phosphor2)]),
     [confirmed crashes], [#signal([1])], [0],
     [evidence], [crash input + replay], [reasoning to validate],
-    [strength], [runtime behavior], [broad design coverage],
-    [weakness], [harness scope], [overstatement risk],
+    [strength], [proves runtime behavior], [covers broader design risks],
+    [weakness], [limited by harness], [can hallucinate or overstate],
   )
   #v(28pt)
   #lead[Fuzzing answered "what happened." AI helped decide "what to test next."]
