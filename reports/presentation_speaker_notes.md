@@ -3,7 +3,7 @@
 ## Slide 00 — Project Open
 
 Core message:
-This is a local audit experiment on an **already-fixed** Nim bug.
+This is a local audit experiment comparing two inspection methods.
 
 Visual anchor:
 `FUZZING VS AI REVIEW`
@@ -22,11 +22,6 @@ The standard is evidence:
 payload.
 reproducer.
 replay.
-
-Important framing:
-This is not a live-risk claim.
-
-It is a controlled reproduction of a bug fixed upstream in Nim PR 25793.
 
 Transition:
 So the question is not "is this dangerous today."
@@ -71,14 +66,14 @@ With that standard, the result becomes very simple.
 ## Slide 02 — Result Summary
 
 Core message:
-Fuzzing produced one confirmed historical crash; AI produced **zero** confirmed crashes.
+Fuzzing produced one confirmed crash; AI produced **zero** confirmed crashes.
 
 Visual anchor:
 The three large values: `1`, `0`, `HTTP/`.
 
 Point first to `1`.
 
-One confirmed runtime crash in the older tested version.
+One confirmed runtime crash.
 
 Point to `0`.
 
@@ -110,14 +105,11 @@ The historical bug lives at a parser boundary where client text becomes program 
 Visual anchor:
 Left-side list: request line, headers, body.
 
-Clarify scope immediately:
-This was local defensive testing.
-
-Older Nim version.
-
-Already fixed upstream.
-
+Scope disclaimer — say this clearly once:
+This was local defensive testing against an intentionally older Nim version.
+Already fixed upstream in PR 25793.
 No remote system was tested.
+No live-risk claim.
 
 Now explain the boundary.
 
@@ -200,7 +192,7 @@ Then it stops.
 
 A robust parser should reject it or return a handled error.
 
-In the older version, it raised `IndexDefect`.
+It raised `IndexDefect`.
 
 Visual anchor:
 Right terminal: `parseProtocol("HTTP/")`.
@@ -250,9 +242,6 @@ Only skip if there is still a character.
 Emphasis moment:
 That tiny condition changes crash into **control**.
 
-Important framing:
-This is already merged upstream in Nim PR 25793.
-
 Transition:
 Now we can separate a real finding from a noisy report.
 
@@ -280,7 +269,7 @@ Step 03:
 Standalone replay confirms the same defect.
 
 Step 04:
-Upstream PR 25793 applies the same guard we identified.
+Fixed version rejects the input safely.
 
 Terminal anchor:
 artifact.
@@ -428,7 +417,7 @@ The final slide lists the sources behind that claim.
 ## Slide 11 — References
 
 Core message:
-The work is grounded in reproducible tooling and the upstream Nim fix.
+The work is grounded in reproducible tooling and an upstream fix.
 
 Visual anchor:
 Reference list.
@@ -442,14 +431,10 @@ References 2 through 4:
 fuzzing and sanitizer background.
 
 Reference 5:
-the key validation point.
-
-Nim PR 25793 merged the same kind of bounds guard.
+the key validation point — the upstream bounds guard.
 
 Closing line:
-So the contribution here is not discovering an active risk.
-
-It is demonstrating a clean evidence pipeline on a real, already-fixed parser bug.
+The contribution is demonstrating a clean evidence pipeline on a real parser bug.
 
 End with:
 Fuzzing found the behavior.
