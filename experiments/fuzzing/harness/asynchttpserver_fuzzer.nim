@@ -1,3 +1,15 @@
+## Fuzz harness for the HTTP request parser in Nim's asynchttpserver.
+##
+## Code sections copied from:
+##   ~/Projects/Nim/lib/pure/asynchttpserver.nim
+##   commit 115ec7a433a7c55b596f526b7ca9187cc50fc980 (2026-04-07, HEAD)
+##
+## The original async proc processRequest (lines 173-334) interleaves parsing
+## with network I/O (await client.recvLineInto / await client.recv). This file
+## extracts the same parsing logic into synchronous procs that operate on a
+## contiguous string buffer, making it suitable for libFuzzer. HTTP error
+## responses are replaced with ValueError raises.
+
 import std/[httpcore, parseutils, strutils, uri]
 
 const
@@ -11,6 +23,8 @@ type ParsedRequest = object
   url: Uri
   body: string
 
+# --- begin asynchttpserver.nim: parseProtocol (lines 148-157) ---
+
 proc parseProtocolOriginal(protocol: string): tuple[orig: string, major, minor: int] =
   result = default(tuple[orig: string, major, minor: int])
   var i = protocol.skipIgnoreCase("HTTP/")
@@ -20,6 +34,10 @@ proc parseProtocolOriginal(protocol: string): tuple[orig: string, major, minor: 
   i.inc protocol.parseSaturatedNatural(result.major, i)
   i.inc
   i.inc protocol.parseSaturatedNatural(result.minor, i)
+
+# --- end asynchttpserver.nim: parseProtocol ---
+
+# --- begin asynchttpserver.nim: method dispatch (lines 221-233 of processRequest) ---
 
 proc parseMethod(part: string): HttpMethod =
   case part
@@ -34,6 +52,11 @@ proc parseMethod(part: string): HttpMethod =
   of "TRACE": HttpTrace
   else:
     raise newException(ValueError, "unknown method")
+
+# --- end asynchttpserver.nim: method dispatch ---
+
+# nextLine: synchronous replacement for await client.recvLineInto.
+# No counterpart in the original — the original reads from a network socket.
 
 proc nextLine(input: string, pos: var int): string =
   if pos >= input.len:
@@ -52,6 +75,8 @@ proc nextLine(input: string, pos: var int): string =
   elif pos < input.len and input[pos] == '\n':
     inc pos
 
+# --- begin asynchttpserver.nim: hasChunkedEncoding (lines 162-171) ---
+
 proc hasChunkedEncoding(request: ParsedRequest): bool =
   const transferEncoding = "Transfer-Encoding"
 
@@ -60,6 +85,15 @@ proc hasChunkedEncoding(request: ParsedRequest): bool =
       if "chunked" == encoding.strip:
         return request.reqMethod == HttpPost
   return false
+
+# --- end asynchttpserver.nim: hasChunkedEncoding ---
+
+# --- begin asynchttpserver.nim: processRequest (lines 173-334), de-asynced ---
+#
+# The original is an async proc using await client.recvLineInto / await client.recv.
+# Here every await recv* is replaced by nextLine() or direct buffer indexing,
+# and HTTP error responses are replaced by ValueError raises.
+# The parsing decisions are otherwise the same step for step.
 
 proc parseFullRequestOriginal(input: string) =
   var pos = 0
@@ -129,6 +163,8 @@ proc parseFullRequestOriginal(input: string) =
       pos.inc 2
   elif request.reqMethod == HttpPost:
     raise newException(ValueError, "content length required")
+
+# --- end asynchttpserver.nim: processRequest ---
 
 proc LLVMFuzzerTestOneInput(data: ptr UncheckedArray[byte], len: csize_t): cint {.
     exportc, cdecl, raises: [].} =
