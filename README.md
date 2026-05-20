@@ -12,7 +12,7 @@ This project compares two vulnerability-discovery methods on Nim's
 - `experiments/fuzzing/` - fuzzing harnesses, seed corpus, saved logs, and crash artifact.
 - `ai_findings/` - model prompt, model outputs, and extracted AI findings.
 - `validation/` - confirmed finding summary and minimal reproducer.
-- `docs/` - course PDFs, extracted text copies, and project notes.
+- `docs/` - course PDFs
 
 ## Reproduce the Main Finding
 
